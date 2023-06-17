@@ -1,0 +1,38 @@
+{
+  "editor.tabSize": 2,
+  "editor.formatOnSave": false,
+  "editor.wordWrapColumn": 120,
+  "python.formatting.provider": "yapf",
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    "data/.cache": true,
+    "data/postgresql": true,
+    "logs/": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/tmp/**": true,
+    "**/dist/**": true,
+    "data/.cache": true,
+    "data/postgresql": true,
+    "logs/": true
+  },
+  "search.exclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/tmp/**": true,
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "data/.cache": true,
+    "data/postgresql": true,
+    "logs/": true
+  },
+  "search.followSymlinks": false
+}
