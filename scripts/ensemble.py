@@ -30,8 +30,10 @@ parser.add_argument('--sample_ids', default=None, type=str)
 
 parser.add_argument("--tag", type=str, required=True)
 parser.add_argument("--merge", type=str, required=True, choices=MERGE_OPS)
+parser.add_argument("--ranked_alpha", type=float, default=2., help="only used if merge is `ranked`.")
+
 parser.add_argument("--out_dir", default="", type=str)
-parser.add_argument('--EXPERIMENTS', nargs="+", type=str)
+parser.add_argument('--experiments', nargs="+", type=str)
 parser.add_argument('--weights_path', default=None, type=str)
 
 parser.add_argument('--verbose', default=1, type=int)
@@ -48,7 +50,7 @@ def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
   errors = []
 
   if process_id == 0:
-    subset = tqdm(subset, mininterval=2.)
+    subset = tqdm(subset, mininterval=5.)
 
   with torch.no_grad():
     for image, image_id, label in subset:
@@ -81,25 +83,31 @@ def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
         elif args.merge == "max":
           cam = np.max([e[0] for e in ensemble], axis=0)
 
-        elif args.merge == "weighted":
-          wc = weights.loc[:, label + 1].mean(axis=1)  # (E, C) --> (E, K) --> (E)
-          wc /= wc.sum()
+        else:  # Class-based merging
+          cam = []
 
-          cam = np.sum([e[0] * w for e, w in zip(ensemble, wc)], axis=0)
-        elif args.merge == "ranked":
-          wc = weights.loc[:, label + 1].mean(axis=1)  # (E, C) --> (E, K) --> (E)
-          wc = wc.argsort()[::-1]
-          wc = wc.argsort()
-          rank_weights = np.exp(-wc)
-          rank_weights /= rank_weights.sum()
+          for ic, c in enumerate(np.where(label > 0.5)[0]):
+            wc = weights.loc[c + 1]
 
-          cam = np.sum([e[0] * w for e, w in zip(ensemble, rank_weights)], axis=0)
+            if args.merge == "weighted":
+              wc = np.exp(wc * 0.25)
+              wc /= wc.sum()
+              cam_c = np.sum([e[0][ic] * w for e, w in zip(ensemble, wc)], axis=0)
 
-        elif args.merge == "highest":
-          wc = weights.loc[:, label + 1].mean(axis=1)  # (E, C) --> (E, K) --> (E)
-          wc = wc.argmax()
+            elif args.merge == "ranked":
+              wc = wc.argsort()[::-1]
+              wc = wc.argsort()
+              wc = np.exp(-wc * args.ranked_alpha)
+              wc /= wc.sum()
 
-          cam = ensemble[wc][0]
+              cam_c = np.sum([e[0][ic] * w for e, w in zip(ensemble, wc)], axis=0)
+
+            elif args.merge == "highest":
+              cam_c = ensemble[wc.argmax()][0][ic]
+
+            cam.append(cam_c)
+
+          cam = np.stack(cam, axis=0)
 
       except ValueError as error:
         print(f"Cannot merge ensemble for {image_id} due to:")
@@ -112,7 +120,7 @@ def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
 
       try:
         np.save(out_path, {"keys": keys, "hr_cam": cam})
-      except KeyboardInterrupt:
+      except:
         if os.path.exists(out_path):
           os.remove(out_path)
         raise
@@ -136,9 +144,9 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   TAG = args.tag
-  EXPERIMENTS = args.EXPERIMENTS
-  OUT_DIR = create_directory(args.out_dir or f"./EXPERIMENTS/predictions/{TAG}/")
-  cam_dirs = [f'./EXPERIMENTS/predictions/{e}/' for e in EXPERIMENTS]
+  EXPERIMENTS = args.experiments
+  OUT_DIR = create_directory(args.out_dir or f"./experiments/predictions/{TAG}/")
+  CAM_DIRS = [f'./experiments/predictions/{e}/' for e in EXPERIMENTS]
 
   set_seed(args.seed)
 
@@ -148,12 +156,16 @@ if __name__ == '__main__':
   dataset = get_inference_dataset(args.dataset, args.data_dir, args.domain, sample_ids=args.sample_ids)
   dataset = split_dataset(dataset, args.num_workers)
 
-  if args.weights_path:
+  if args.weights_path and args.merge in ("weighted", "ranked", "highest"):
     weights = pd.read_csv(args.weights_path)
+    print(f"Merging weights loaded from {args.weights_path}:")
+    print(weights.round(2))
+  else:
+    weights = None
 
   if args.num_workers > 1:
     multiprocessing.spawn(
-      _work, nprocs=args.num_workers, args=(dataset, args, EXPERIMENTS, cam_dirs, weights, OUT_DIR), join=True
+      _work, nprocs=args.num_workers, args=(dataset, args, EXPERIMENTS, CAM_DIRS, weights, OUT_DIR), join=True
     )
   else:
-    _work(0, dataset, args, EXPERIMENTS, cam_dirs, weights, OUT_DIR)
+    _work(0, dataset, args, EXPERIMENTS, CAM_DIRS, weights, OUT_DIR)
