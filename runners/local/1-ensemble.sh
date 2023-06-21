@@ -21,6 +21,7 @@ run_ensemble () {
     --seed           $SEED                  \
     --tag            $TAG                   \
     --merge          $MERGE                 \
+    --alpha          $ALPHA                 \
     --weights_path   "$WEIGHTS_PATH"        \
     --dataset        $DATASET               \
     --domain         $DOMAIN                \
@@ -43,8 +44,23 @@ WEIGHTS_PATH=""
 
 TAG=ensemble/ra-oc-p-poc-pnoc-highest
 EXPERIMENTS="vanilla/resnest269@randaug@train@scale=0.5,1.0,1.5,2.0 literature/rn38d-occse puzzle/resnest269@puzzlerep2@train@scale=0.5,1.0,1.5,2.0 poc/voc12-rs269-poc-ls0.1@rs269ra-r3@train@scale=0.5,1.0,1.5,2.0 pnoc/voc12-rs269-pnoc-ls0.1-ow0.0-1.0-1.0-cams-0.2-octis1-amp@rs269ra-r3@train@scale=0.5,1.0,1.5,2.0"
-MERGE=highest  # weighted, ranked
+MERGE=highest
 WEIGHTS_PATH=experiments/logs/ious.csv
+# run_ensemble
+
+# TAG=ensemble/ra-oc-p-poc-pnoc-ranked
+# MERGE=ranked
+# ALPHA=2.0
+# run_ensemble
+
+# TAG=ensemble/ra-oc-p-poc-pnoc-weighted
+# MERGE=weighted
+# ALPHA=0.25
+# run_ensemble
+
+MERGE=learned
+ALPHA=0.25
+TAG=ensemble/ra-oc-p-poc-pnoc-$MERGE-a$ALPHA
 run_ensemble
 
 # WEIGHTS=puzzle/ResNeSt269@Puzzle@optimal

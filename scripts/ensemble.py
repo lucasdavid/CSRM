@@ -12,11 +12,11 @@ from torch import multiprocessing
 from torch.utils.data import Subset
 from tqdm import tqdm
 
+from core import ensemble
 from core.datasets import get_inference_dataset
 from tools.ai.torch_utils import set_seed
 from tools.general.io_utils import create_directory, load_cam_file
 
-MERGE_OPS = ["sum", "avg", "max", "weighted", "ranked", "highest"]
 
 parser = argparse.ArgumentParser()
 
@@ -29,8 +29,8 @@ parser.add_argument('--domain', default='train', type=str)
 parser.add_argument('--sample_ids', default=None, type=str)
 
 parser.add_argument("--tag", type=str, required=True)
-parser.add_argument("--merge", type=str, required=True, choices=MERGE_OPS)
-parser.add_argument("--ranked_alpha", type=float, default=2., help="only used if merge is `ranked`.")
+parser.add_argument("--merge", type=str, required=True, choices=list(ensemble.STRATEGIES))
+parser.add_argument("--alpha", type=float, default=None, help="only used if merge is `weighted` or `ranked`.")
 
 parser.add_argument("--out_dir", default="", type=str)
 parser.add_argument('--experiments', nargs="+", type=str)
@@ -53,66 +53,34 @@ def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
     subset = tqdm(subset, mininterval=5.)
 
   with torch.no_grad():
-    for image, image_id, label in subset:
+    for image, image_id, targets in subset:
       out_path = os.path.join(out_dir, image_id + '.npy')
 
-      if os.path.isfile(out_path) or label.sum() == 0:
+      if os.path.isfile(out_path) or targets.sum() == 0:
         # Skip samples already processed or containing only bg
         continue
 
-      ensemble = []
+      partial_cams = []
 
       W, H = image.size
 
-      for experiment_id, cam_dir in zip(experiments, cam_dirs):
+      for cam_dir in cam_dirs:
         cam_path = os.path.join(cam_dir, image_id + '.npy')
 
         cam, keys = load_cam_file(npy_file=cam_path, png_file=None)
-        ensemble.append((cam, keys))
+        partial_cams.append((cam, keys))
 
       if args.verbose >= 2:
-        print(f"  shapes = {[e[0].shape for e in ensemble]}")
-        print(f"  label  = {[[0] + (np.where(label)[0]+1)]}")
-        print(f"  keys   = {[e[1] for e in ensemble]}")
+        print(f"  shapes = {[e[0].shape for e in partial_cams]}")
+        print(f"  label  = {[[0] + (np.where(targets)[0]+1)]}")
+        print(f"  keys   = {[e[1] for e in partial_cams]}")
 
       try:
-        if args.merge == "sum":
-          cam = np.sum([e[0] for e in ensemble], axis=0)
-        elif args.merge == "avg":
-          cam = np.mean([e[0] for e in ensemble], axis=0)
-        elif args.merge == "max":
-          cam = np.max([e[0] for e in ensemble], axis=0)
-
-        else:  # Class-based merging
-          cam = []
-
-          for ic, c in enumerate(np.where(label > 0.5)[0]):
-            wc = weights.loc[c + 1]
-
-            if args.merge == "weighted":
-              wc = np.exp(wc * 0.25)
-              wc /= wc.sum()
-              cam_c = np.sum([e[0][ic] * w for e, w in zip(ensemble, wc)], axis=0)
-
-            elif args.merge == "ranked":
-              wc = wc.argsort()[::-1]
-              wc = wc.argsort()
-              wc = np.exp(-wc * args.ranked_alpha)
-              wc /= wc.sum()
-
-              cam_c = np.sum([e[0][ic] * w for e, w in zip(ensemble, wc)], axis=0)
-
-            elif args.merge == "highest":
-              cam_c = ensemble[wc.argmax()][0][ic]
-
-            cam.append(cam_c)
-
-          cam = np.stack(cam, axis=0)
-
+        cam = ensemble.merge(partial_cams, targets, args.merge, weights=weights, alpha=args.alpha)
       except ValueError as error:
         print(f"Cannot merge ensemble for {image_id} due to:")
         print(error)
-        print(f"parts: {[e[0].shape for e in ensemble]}", file=sys.stderr)
+        print(f"parts: {[e[0].shape for e in partial_cams]}", file=sys.stderr)
         continue
 
       if args.verbose >= 2:
