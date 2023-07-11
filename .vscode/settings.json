@@ -34,5 +34,7 @@
     "data/postgresql": true,
     "logs/": true
   },
+  "extensions.autoCheckUpdates": false,
+  "extensions.autoUpdate": false,
   "search.followSymlinks": false
 }
