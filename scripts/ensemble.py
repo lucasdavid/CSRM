@@ -3,6 +3,7 @@
 
 import argparse
 import os
+from pickle import UnpicklingError
 import sys
 
 import numpy as np
@@ -12,10 +13,10 @@ from torch import multiprocessing
 from torch.utils.data import Subset
 from tqdm import tqdm
 
-from core import ensemble
-from core.datasets import get_inference_dataset
+import ensemble
+import datasets
 from tools.ai.torch_utils import set_seed
-from tools.general.io_utils import create_directory, load_cam_file
+from tools.general.io_utils import create_directory, str2bool
 
 
 parser = argparse.ArgumentParser()
@@ -27,6 +28,7 @@ parser.add_argument('--dataset', default='voc12', choices=['voc12', 'coco14'])
 parser.add_argument('--data_dir', default='../VOCtrainval_11-May-2012/', type=str)
 parser.add_argument('--domain', default='train', type=str)
 parser.add_argument('--sample_ids', default=None, type=str)
+parser.add_argument('--exclude_bg_images', default=True, type=str2bool)
 
 parser.add_argument("--tag", type=str, required=True)
 parser.add_argument("--merge", type=str, required=True, choices=list(ensemble.STRATEGIES))
@@ -43,8 +45,9 @@ def split_dataset(dataset, n_splits):
   return [Subset(dataset, np.arange(i, len(dataset), n_splits)) for i in range(n_splits)]
 
 
-def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
+def _work(process_id, dataset: Subset, args, experiments, cam_dirs, weights, out_dir):
   subset = dataset[process_id]
+  data_source: datasets.CustomDataSource = subset.dataset.data_source
   processed = 0
   missing = []
   errors = []
@@ -53,22 +56,50 @@ def _work(process_id, dataset, args, experiments, cam_dirs, weights, out_dir):
     subset = tqdm(subset, mininterval=5.)
 
   with torch.no_grad():
-    for image, image_id, targets in subset:
+    for image_id, image_path, mask_path in subset:
       out_path = os.path.join(out_dir, image_id + '.npy')
 
-      if os.path.isfile(out_path) or targets.sum() == 0:
-        # Skip samples already processed or containing only bg
+      if os.path.isfile(out_path):
+        # Skip samples already processed.
         continue
 
+      image = data_source.get_image(image_id)
+      targets = data_source.get_label(image_id)
+
       partial_cams = []
+
 
       W, H = image.size
 
       for cam_dir in cam_dirs:
         cam_path = os.path.join(cam_dir, image_id + '.npy')
 
-        cam, keys = load_cam_file(npy_file=cam_path, png_file=None)
-        partial_cams.append((cam, keys))
+        try:
+          data = np.load(cam_path, allow_pickle=True).item()
+        except UnpicklingError as error:
+          errors.append(cam_path)
+          if args.verbose >= 3:
+            print(f"{image_id} skipped (cam error={error})")
+        except FileNotFoundError:
+          missing.append(cam_path)
+          if args.verbose >= 3:
+            print(f"{image_id} skipped (cam missing)")
+        else:
+          if "keys" in data:
+            # Affinity/Puzzle/PNOC
+            keys = data["keys"]
+
+            if "hr_cam" in data.keys():
+              cam = data["hr_cam"]
+            elif "rw" in data.keys():
+              cam = data["rw"]
+          else:
+            # OC-CSE
+            keys = list(data.keys())
+            cam = np.stack([data[k] for k in keys], 0)
+            keys = np.asarray([0] + [k+1 for k in keys])
+
+          partial_cams.append((cam, keys))
 
       if args.verbose >= 2:
         print(f"  shapes = {[e[0].shape for e in partial_cams]}")
@@ -121,7 +152,8 @@ if __name__ == '__main__':
   print(TAG)
   print("Experiments:", *EXPERIMENTS, sep="\n  - ", end="\n\n")
 
-  dataset = get_inference_dataset(args.dataset, args.data_dir, args.domain, sample_ids=args.sample_ids)
+  source = datasets.custom_data_source(args.dataset, args.data_dir, args.domain, sample_ids=args.sample_ids)
+  dataset = datasets.PathsDataset(source, ignore_bg_images=True)
   dataset = split_dataset(dataset, args.num_workers)
 
   if args.weights_path and args.merge in ("weighted", "ranked", "highest"):
