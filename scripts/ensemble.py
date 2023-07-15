@@ -1,6 +1,3 @@
-# Copyright (C) 2020 * Ltd. All rights reserved.
-# author : Sanghyeon Jo <josanghyeokn@gmail.com>
-
 import argparse
 import os
 from pickle import UnpicklingError

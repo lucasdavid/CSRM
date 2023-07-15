@@ -17,7 +17,8 @@ def max_st(parts, targets=None, weights=None, alpha=None):
 
 
 def weighted_st(parts, targets, weights, alpha=0.25):
-  if alpha is None: alpha = 0.25
+  if alpha is None:
+    alpha = 0.25
 
   cam = []
 
@@ -35,7 +36,8 @@ def weighted_st(parts, targets, weights, alpha=0.25):
 
 
 def ranked_st(parts, targets, weights, alpha=2.0):
-  if alpha is None: alpha = 2.0
+  if alpha is None:
+    alpha = 2.0
 
   cam = []
 
@@ -70,7 +72,8 @@ def highest_st(parts, targets, weights, alpha=None):
 def learned_st(parts, targets, weights=None, alpha=None):
   """Learned strategy based on VOC 2012 results.
   """
-  if alpha is None: alpha = 2.0
+  if alpha is None:
+    alpha = 2.0
   cam = []
 
   # ra, oc, p, poc, pnoc = parts
@@ -88,7 +91,7 @@ def learned_st(parts, targets, weights=None, alpha=None):
   for ic, c in enumerate(np.where(targets > 0.5)[0]):
     if c == 14:
       # Person: poc, oc, ra, pnoc, p
-      wc =  np.asarray([.1, .2, .1, .5, .1])
+      wc = np.asarray([.1, .2, .1, .5, .1])
     else:
       # General: pnoc, poc, oc, p, ra
       ranks = np.asarray([3, 2, 3, 1, 0])
@@ -114,9 +117,7 @@ STRATEGIES = {
 
 def merge(parts, targets, strategy, weights=None, alpha=None):
   if strategy not in STRATEGIES:
-    raise ValueError(
-      f"Unknown merge strategy {strategy}. Available strategies are: {list(STRATEGIES)}"
-    )
+    raise ValueError(f"Unknown merge strategy {strategy}. Available strategies are: {list(STRATEGIES)}")
 
   return STRATEGIES[strategy](
     parts=parts,
