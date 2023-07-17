@@ -84,19 +84,17 @@ def learned_st(parts, targets, weights=None, alpha=None):
 
   if labels == 1:
     # Singletons: p, pnoc, poc, oc, ra
-    wc = np.asarray([.1, .1, .5, .15, .15])
+    wc = np.asarray([.05, .05, .4, .2, .3])
     cam = np.sum([e[0] * w for e, w in zip(parts, wc)], axis=0)
     return cam
 
   for ic, c in enumerate(np.where(targets > 0.5)[0]):
     if c == 14:
-      # Person: poc, oc, ra, pnoc, p
-      wc = np.asarray([.1, .2, .1, .5, .1])
+      # Person: poc, pnoc, oc, ra, p
+      wc = np.asarray([.05, .2, .05, .35, .35])
     else:
       # General: pnoc, poc, oc, p, ra
-      ranks = np.asarray([3, 2, 3, 1, 0])
-      wc = np.exp(-ranks * alpha)
-      wc /= wc.sum()
+      wc = np.asarray([.1, .2, .1, .3, .3])
     cam_c = np.sum([e[0][ic] * w for e, w in zip(parts, wc)], axis=0)
     cam.append(cam_c)
 
