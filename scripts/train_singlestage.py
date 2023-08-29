@@ -9,7 +9,8 @@ from tqdm import tqdm
 import datasets
 import wandb
 from core.networks import *
-from core.training import priors_validation_step, segmentation_validation_step
+from core.training import segmentation_validation_step
+from singlestage import SingleStageModel
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *
 from tools.ai.evaluate_utils import *
@@ -20,8 +21,6 @@ from tools.ai.torch_utils import *
 from tools.general import wandb_utils
 from tools.general.io_utils import *
 from tools.general.time_utils import *
-
-from singlestage import SingleStageModel
 
 parser = argparse.ArgumentParser()
 
@@ -75,7 +74,6 @@ parser.add_argument('--augment', default='', type=str)
 parser.add_argument('--cutmix_prob', default=1.0, type=float)
 parser.add_argument('--mixup_prob', default=1.0, type=float)
 
-
 import cv2
 
 cv2.setNumThreads(0)
@@ -89,15 +87,25 @@ GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
 
 
+def to_2d(x):
+  return x[..., None, None]
+
+
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  tt, tv = datasets.get_classification_transforms(args.min_image_size, args.max_image_size, args.image_size, args.augment)
+  tt, tv = datasets.get_classification_transforms(
+    args.min_image_size, args.max_image_size, args.image_size, args.augment
+  )
   train_dataset = datasets.ClassificationDataset(ts, transform=tt)
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
-  train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
+  train_dataset = datasets.apply_augmentation(
+    train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob
+  )
 
-  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True)
+  train_loader = DataLoader(
+    train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True
+  )
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True)
   train_iterator = datasets.Iterator(train_loader)
   log_dataset(args.dataset, train_dataset, tt, tv)
@@ -142,7 +150,15 @@ def train_singlestage(args, wb_run, model_path):
     model = torch.nn.DataParallel(model)
 
   # Loss, Optimizer
-  optimizer = get_optimizer(args.lr, args.wd, int(step_max // args.accumulate_steps), param_groups, algorithm=args.optimizer, alpha_scratch=args.lr_alpha_scratch, alpha_bias=args.lr_alpha_bias)
+  optimizer = get_optimizer(
+    args.lr,
+    args.wd,
+    int(step_max // args.accumulate_steps),
+    param_groups,
+    algorithm=args.optimizer,
+    alpha_scratch=args.lr_alpha_scratch,
+    alpha_bias=args.lr_alpha_bias
+  )
   scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
   log_opt_params("SingleStage", param_groups)
 
@@ -161,10 +177,11 @@ def train_singlestage(args, wb_run, model_path):
     w_b = linear_schedule(step, step_max, 0.0, 1.0, 0.5)
 
     with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-      loss, metrics = SingleStageModel.train_step(
+      loss, metrics = train_step(
         model,
         images.to(DEVICE),
         targets.to(DEVICE),
+        (model.criterion_c, model.criterion_s, model.criterion_b),
         bg_t=bg_t,
         fg_t=fg_t,
         resize_align_corners=None,
@@ -241,6 +258,97 @@ def train_singlestage(args, wb_run, model_path):
 
   print(TAG)
   wb_run.finish()
+
+
+def train_step(
+  model,
+  images,
+  targets,
+  criterions,
+  bg_t=0.05,
+  fg_t=0.3,
+  resize_align_corners=None,
+  ls=0.0,
+  w_s=1.0,
+  w_u=1.0,
+  w_b=1.0,
+  device="cuda"
+):
+  criterion_c, criterion_s, criterion_b = criterions
+
+  # Forward
+  logits, features, logits_saliency, logits_segm, logits_segm_res = model(
+    images, with_cam=True, with_mask=True, with_saliency=True
+  )
+
+  # (1) Classification loss.
+  loss_c = criterion_c(logits, label_smoothing(targets, ls))
+
+  # (2) Segmentation loss.
+  pseudo_masks = get_pseudo_label(
+    images, features, targets, bg_t, fg_t, resize_align_corners, device
+  )
+
+  loss_s = criterion_s(logits_segm_res, pseudo_masks)
+
+  # (3) BG loss.
+  pseudo_saliencies = (1 - torch.softmax(logits_segm, dim=1)[:, 0:1])
+  logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
+  loss_b = criterion_b(logits_saliency, pseudo_saliencies)
+
+  # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
+  y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0))  # Mark background=0 (occurs). # B, C
+  pixels_u = pseudo_masks == 255  # [B, H, W]
+  loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
+  loss_u = -y_n * torch.log(loss_u)  # [A, B]
+  loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1)
+  loss_u = loss_u[pixels_u].mean()
+
+  loss = loss_c + w_s * loss_s + w_u * loss_u + w_b * loss_b
+
+  losses_values = {
+    "loss_c": loss_c,
+    "loss_s": loss_s,
+    "loss_b": loss_b,
+    "loss_u": loss_u,
+  }
+
+  return loss, losses_values
+
+
+def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None, device="cuda"):
+  sizes = images.shape[2:]
+  images = to_numpy(images)
+  # targets = to_numpy(targets)
+  # cams = to_numpy(cams)
+
+  masks = []
+
+  for image, cam, target in zip(images, cams.cpu().to(torch.float32), targets.cpu()):
+    labels = target > 0.5
+    cam = cam[labels]
+    cam = make_cam(cam, inplace=True, global_norm=True)
+    cam = resize_tensor(cam[None, ...], sizes, align_corners=resize_align_corners)[0]
+    cam = to_numpy(cam)
+    keys = np.concatenate(([0], np.where(labels)[0]))
+
+    image = denormalize(image, *datasets.imagenet_stats())
+
+    fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
+    fg_cam = np.argmax(fg_cam, axis=0)
+    fg_conf = keys[crf_inference_label(image, fg_cam, n_labels=keys.shape[0])]
+
+    bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
+    bg_cam = np.argmax(bg_cam, axis=0)
+    bg_conf = keys[crf_inference_label(image, bg_cam, n_labels=keys.shape[0])]
+
+    mask = fg_conf.copy()
+    mask[fg_conf == 0] = 255
+    mask[bg_conf + fg_conf == 0] = 0
+
+    masks.append(mask)
+
+  return torch.as_tensor(np.asarray(masks, dtype="int64"), device=device)
 
 
 if __name__ == '__main__':

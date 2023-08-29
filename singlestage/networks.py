@@ -1,21 +1,17 @@
-from datasets import imagenet_stats
 import numpy as np
-from tools.ai.demo_utils import crf_inference_label, denormalize
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
-from tools.ai.torch_utils import (L1_Loss, L2_Loss, gap2d, label_smoothing, make_cam, resize_tensor,
-                                  set_trainable_layers, to_numpy)
 from core.networks import *
-
-
-def to_2d(x):
-      return x[..., None, None]
+from datasets import imagenet_stats
+from tools.ai.demo_utils import crf_inference_label, denormalize
+from tools.ai.torch_utils import gap2d, make_cam, resize_tensor, to_numpy
 
 
 class SingleStageModel(Backbone):
+
   def __init__(
     self,
     model_name,
@@ -114,93 +110,17 @@ class SingleStageModel(Backbone):
       logits = self.classifier(features).view(-1, self.num_classes)
       return logits
 
-  @staticmethod
-  def train_step(model, images, targets, bg_t=0.05, fg_t=0.3, resize_align_corners=None, ls=0.0, w_s=1.0, w_u=1.0, w_b=1.0, device="cuda"):
-    sizes = images.shape[2:]
-
-    # Forward
-    logits, features, logits_segm, logits_segm_res, logits_saliency = model(images, with_cam=True, with_mask=True, with_saliency=True)
-
-    # logits, features = model.classification_branch(features_s5, with_cam=True)
-    # logits_s = model.segmentation_branch(features_s5, features_s2)
-    # logits_s_resized = resize_tensor(logits_s, sizes, align_corners=resize_align_corners)
-
-    # (1) Classification loss.
-    loss_c = model.module.criterion_c(logits, label_smoothing(targets, ls))
-
-    # (2) Segmentation loss.
-    pseudo_masks = SingleStageModel._get_pseudo_label(images, features, targets, sizes, bg_t, fg_t, resize_align_corners, device)
-
-    loss_s = model.module.criterion_s(logits_segm_res, pseudo_masks)
-
-    # (3) BG loss.
-    pseudo_saliencies = (1 - torch.softmax(logits_segm, dim=1)[:, 0:1])
-    logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
-    loss_b = model.module.criterion_b(logits_saliency, pseudo_saliencies)
-
-    # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
-    y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0))  # Mark background=0 (occurs). # B, C
-    pixels_u = pseudo_masks == 255  # [B, H, W]
-    loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
-    loss_u = -y_n * torch.log(loss_u)  # [A, B]
-    loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1)
-    loss_u = loss_u[pixels_u].mean()
-
-    loss = loss_c + w_s * loss_s + w_u * loss_u + w_b * loss_b
-
-    losses_values = {
-      "loss_c": loss_c,
-      "loss_s": loss_s,
-      "loss_b": loss_b,
-      "loss_u": loss_u,
-    }
-
-    return loss, losses_values
-
-  @staticmethod
-  def _get_pseudo_label(images, cams, targets, sizes, bg_t=0.05, fg_t=0.4, resize_align_corners=None, device="cuda"):
-    images = to_numpy(images)
-    # targets = to_numpy(targets)
-    # cams = to_numpy(cams)
-
-    masks = []
-
-    for image, cam, target in zip(images, cams.cpu().to(torch.float32), targets.cpu()):
-      labels = target > 0.5
-      cam = cam[labels]
-      cam = make_cam(cam, inplace=True, global_norm=True)
-      cam = resize_tensor(cams, sizes, align_corners=resize_align_corners)
-      cam = to_numpy(cam)
-      keys = np.concatenate(([0], np.where(labels)[0]))
-
-      image = denormalize(image, *imagenet_stats())
-
-      fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
-      fg_cam = np.argmax(fg_cam, axis=0)
-      fg_conf = keys[crf_inference_label(image, fg_cam, n_labels=keys.shape[0])]
-
-      bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
-      bg_cam = np.argmax(bg_cam, axis=0)
-      bg_conf = keys[crf_inference_label(image, bg_cam, n_labels=keys.shape[0])]
-
-      mask = fg_conf.copy()
-      mask[fg_conf == 0] = 255
-      mask[bg_conf + fg_conf == 0] = 0
-
-      masks.append(mask)
-
-    return torch.as_tensor(np.asarray(masks, dtype="uint8"), device=device)
 
 if __name__ == "__main__":
   DEVICE = "cuda"
 
   model = SingleStageModel(
-    "resnet50", # args.architecture,
-    21, # train_dataset.info.num_classes,
-    mode="fix", # mode=args.mode,
-    dilated=True, # dilated=args.dilated,
-    regularization=None, # regularization=args.regularization,
-    trainable_stem=True, # trainable_stem=args.trainable_stem,
+    "resnet50",  # args.architecture,
+    21,  # train_dataset.info.num_classes,
+    mode="fix",  # mode=args.mode,
+    dilated=True,  # dilated=args.dilated,
+    regularization=None,  # regularization=args.regularization,
+    trainable_stem=True,  # trainable_stem=args.trainable_stem,
     trainable_backbone=True,
     criterion_c=torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     criterion_s=torch.nn.CrossEntropyLoss(ignore_index=255).to(DEVICE),
