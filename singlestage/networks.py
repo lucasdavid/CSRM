@@ -1,10 +1,13 @@
+from datasets import imagenet_stats
+import numpy as np
+from tools.ai.demo_utils import crf_inference_label, denormalize
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
 from tools.ai.torch_utils import (L1_Loss, L2_Loss, gap2d, label_smoothing, make_cam, resize_tensor,
-                                  set_trainable_layers)
+                                  set_trainable_layers, to_numpy)
 from core.networks import *
 
 
@@ -62,7 +65,7 @@ class SingleStageModel(Backbone):
     self.criterion_c = criterion_c or torch.nn.MultiLabelSoftMarginLoss()
     self.criterion_s = criterion_s or torch.nn.CrossEntropyLoss(ignore_index=255)
     # self.criterion_b = criterion_b or torch.nn.MultiLabelSoftMarginLoss()
-    self.criterion_b = criterion_b or L1_Loss
+    self.criterion_b = criterion_b or torch.nn.BCEWithLogitsLoss()
 
   def forward_features(self, x):
     x = self.stage1(x)
@@ -75,12 +78,23 @@ class SingleStageModel(Backbone):
 
     return features, features_s2
 
-  def forward(self, x, with_cam=False, with_mask=True):
-    features, features_s2 = self.forward_features(x)
+  def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True):
+    features, features_s2 = self.forward_features(inputs)
     outputs = self.classification_branch(features, with_cam=with_cam)
 
+    if with_saliency:
+      if self.use_saliency_head:
+        logits_saliency = self.saliency_head(features)
+      else:
+        logits_saliency = features.sum(dim=1, keepdim=True)
+
+      outputs = (*outputs, logits_saliency)
+
     if with_mask:
-      return (*outputs, self.segmentation_branch(features, features_s2))
+      masks = self.segmentation_branch(features, features_s2)
+      masks_resized = resize_tensor(masks, inputs.size()[2:], align_corners=True)
+
+      outputs = (*outputs, masks, masks_resized)
 
     return outputs
 
@@ -100,40 +114,34 @@ class SingleStageModel(Backbone):
       logits = self.classifier(features).view(-1, self.num_classes)
       return logits
 
-  def train_step(self, images, targets, bg_t=0.05, fg_t=0.3, resize_align_corners=None, ls=0.0, w_s=1.0, w_u=1.0, w_b=1.0):
+  @staticmethod
+  def train_step(model, images, targets, bg_t=0.05, fg_t=0.3, resize_align_corners=None, ls=0.0, w_s=1.0, w_u=1.0, w_b=1.0, device="cuda"):
     sizes = images.shape[2:]
 
     # Forward
-    features_s5, features_s2 = self.forward_features(images)
+    logits, features, logits_segm, logits_segm_res, logits_saliency = model(images, with_cam=True, with_mask=True, with_saliency=True)
 
-    logits, features = self.classification_branch(features_s5, with_cam=True)
-    logits_s = self.segmentation_branch(features_s5, features_s2)
-    logits_s_resized = resize_tensor(logits_s, sizes, align_corners=resize_align_corners)
+    # logits, features = model.classification_branch(features_s5, with_cam=True)
+    # logits_s = model.segmentation_branch(features_s5, features_s2)
+    # logits_s_resized = resize_tensor(logits_s, sizes, align_corners=resize_align_corners)
 
     # (1) Classification loss.
-    loss_c = self.criterion_c(logits, label_smoothing(targets, ls))
+    loss_c = model.module.criterion_c(logits, label_smoothing(targets, ls))
 
     # (2) Segmentation loss.
-    pseudo_masks = self._get_pseudo_label(features, targets, sizes, bg_t, fg_t, resize_align_corners)
+    pseudo_masks = SingleStageModel._get_pseudo_label(images, features, targets, sizes, bg_t, fg_t, resize_align_corners, device)
 
-    loss_s = self.criterion_s(logits_s_resized, pseudo_masks)
+    loss_s = model.module.criterion_s(logits_segm_res, pseudo_masks)
 
     # (3) BG loss.
-    pseudo_saliencies = (1 - torch.softmax(logits_s, dim=1)[:, 0:1])
-
-    # cams = make_cam(features, global_norm=True, inplace=False)
-    if self.use_saliency_head:
-      saliency_logits = self.saliency_head(features)
-    else:
-      saliency_logits = features.sum(dim=1, keepdim=True)
-
-    saliency_logits = resize_tensor(saliency_logits, pseudo_saliencies.shape[2:], align_corners=True)
-    loss_b = self.criterion_b(saliency_logits, pseudo_saliencies)
+    pseudo_saliencies = (1 - torch.softmax(logits_segm, dim=1)[:, 0:1])
+    logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
+    loss_b = model.module.criterion_b(logits_saliency, pseudo_saliencies)
 
     # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
     y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0))  # Mark background=0 (occurs). # B, C
     pixels_u = pseudo_masks == 255  # [B, H, W]
-    loss_u = torch.clamp(1 - torch.sigmoid(logits_s_resized), min=0.0005, max=0.9995)
+    loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
     loss_u = -y_n * torch.log(loss_u)  # [A, B]
     loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1)
     loss_u = loss_u[pixels_u].mean()
@@ -149,21 +157,39 @@ class SingleStageModel(Backbone):
 
     return loss, losses_values
 
-  def _get_pseudo_label(self, cams, targets, sizes, bg_t=0.05, fg_t=0.4, resize_align_corners=None):
-    # cams = cams.detach()
-    cams = cams.detach() * to_2d(targets)
-    cams = make_cam(cams, inplace=True, global_norm=False)
-    cams = resize_tensor(cams, sizes, align_corners=resize_align_corners)
+  @staticmethod
+  def _get_pseudo_label(images, cams, targets, sizes, bg_t=0.05, fg_t=0.4, resize_align_corners=None, device="cuda"):
+    images = to_numpy(images)
+    # targets = to_numpy(targets)
+    # cams = to_numpy(cams)
 
-    saliency, masks = cams.max(dim=1)
-    bg_conf = saliency < bg_t
-    fg_conf = saliency >= fg_t
+    masks = []
 
-    masks += 1  # shift to make room for bg class.
-    masks[bg_conf] = 0
-    masks[~bg_conf & ~fg_conf] = 255
+    for image, cam, target in zip(images, cams.cpu().to(torch.float32), targets.cpu()):
+      labels = target > 0.5
+      cam = cam[labels]
+      cam = make_cam(cam, inplace=True, global_norm=True)
+      cam = resize_tensor(cams, sizes, align_corners=resize_align_corners)
+      cam = to_numpy(cam)
+      keys = np.concatenate(([0], np.where(labels)[0]))
 
-    return masks
+      image = denormalize(image, *imagenet_stats())
+
+      fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
+      fg_cam = np.argmax(fg_cam, axis=0)
+      fg_conf = keys[crf_inference_label(image, fg_cam, n_labels=keys.shape[0])]
+
+      bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
+      bg_cam = np.argmax(bg_cam, axis=0)
+      bg_conf = keys[crf_inference_label(image, bg_cam, n_labels=keys.shape[0])]
+
+      mask = fg_conf.copy()
+      mask[fg_conf == 0] = 255
+      mask[bg_conf + fg_conf == 0] = 0
+
+      masks.append(mask)
+
+    return torch.as_tensor(np.asarray(masks, dtype="uint8"), device=device)
 
 if __name__ == "__main__":
   DEVICE = "cuda"

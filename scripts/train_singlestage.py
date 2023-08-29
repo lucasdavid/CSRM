@@ -9,7 +9,7 @@ from tqdm import tqdm
 import datasets
 import wandb
 from core.networks import *
-from core.training import priors_validation_step
+from core.training import priors_validation_step, segmentation_validation_step
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *
 from tools.ai.evaluate_utils import *
@@ -44,7 +44,9 @@ parser.add_argument('--mode', default='normal', type=str, choices=["normal", "fi
 parser.add_argument('--regularization', default=None, type=str)  # kernel_usage
 parser.add_argument('--trainable-stem', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
+parser.add_argument('--use_saliency_head', default=False, type=str2bool)
 parser.add_argument('--dilated', default=True, type=str2bool)
+parser.add_argument('--use_gn', default=True, type=str2bool)
 parser.add_argument('--restore', default=None, type=str)
 
 # Hyperparameter
@@ -112,8 +114,10 @@ def train_singlestage(args, wb_run, model_path):
     train_dataset.info.num_classes,
     mode=args.mode,
     dilated=args.dilated,
+    use_group_norm=args.use_gn,
     trainable_stem=args.trainable_stem,
     trainable_backbone=args.trainable_backbone,
+    use_saliency_head=args.use_saliency_head,
     criterion_c=torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     criterion_s=torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
     criterion_b=torch.nn.BCEWithLogitsLoss().to(DEVICE),
@@ -148,10 +152,6 @@ def train_singlestage(args, wb_run, model_path):
   miou_best = -1
 
   for step in tqdm(range(step_init, step_max), 'Training', mininterval=2.0, disable=not args.progress):
-    epoch = step // step_val
-    do_logging = (step + 1) % step_log == 0
-    do_validation = args.validate and (step + 1) % step_val == 0
-
     _, images, targets = train_iterator.get()
 
     bg_t = linear_schedule(step, step_max, 0.001, 0.5, 1.0)
@@ -161,7 +161,8 @@ def train_singlestage(args, wb_run, model_path):
     w_b = linear_schedule(step, step_max, 0.0, 1.0, 0.5)
 
     with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-      loss, metrics = model.train_step(
+      loss, metrics = SingleStageModel.train_step(
+        model,
         images.to(DEVICE),
         targets.to(DEVICE),
         bg_t=bg_t,
@@ -171,6 +172,7 @@ def train_singlestage(args, wb_run, model_path):
         w_s=w_s,
         w_u=w_u,
         w_b=w_b,
+        device=DEVICE,
       )
 
     scaler.scale(loss / args.accumulate_steps).backward()
@@ -181,6 +183,10 @@ def train_singlestage(args, wb_run, model_path):
       optimizer.zero_grad(set_to_none=True)  # set_to_none=False  # TODO: Try it with True and check performance.
 
     train_meter.update({m: v.item() for m, v in metrics.items()})
+
+    epoch = step // step_val
+    do_logging = (step + 1) % step_log == 0
+    do_validation = args.validate and (step + 1) % step_val == 0
 
     if do_logging:
       learning_rate = float(get_learning_rate_from_optimizer(optimizer))
@@ -200,18 +206,25 @@ def train_singlestage(args, wb_run, model_path):
       wandb.log(wb_logs, commit=not do_validation)
 
       print(
-        'step={iteration:,} '
-        'lr={learning_rate:.4f} '
-        'loss={loss:.4f} '
-        'class_loss={class_loss:.4f} '
-        'time={time:.0f}sec'.format(**data)
+        "step={iteration:,} "
+        "lr={learning_rate:.4f} "
+        "loss={loss:.4f} "
+        "loss_c={loss_c:.4f} "
+        "loss_s={loss_s:.4f} "
+        "loss_b={loss_b:.4f} "
+        "loss_u={loss_u:.4f} "
+        "time={time:.0f}sec".format(**data)
       )
 
     if do_validation:
       model.eval()
       with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-        metric_results = priors_validation_step(
-          model, valid_loader, train_dataset.info, THRESHOLDS, DEVICE, args.validate_max_steps
+        metric_results = segmentation_validation_step(
+          lambda inputs: model(inputs)[-1],
+          valid_loader,
+          valid_dataset.info,
+          DEVICE,
+          log_samples=True,
         )
       metric_results["iteration"] = step + 1
       model.train()

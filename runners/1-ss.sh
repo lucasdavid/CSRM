@@ -26,7 +26,7 @@
 
 if [[ "`hostname`" == "sdumont"* ]]; then
   ENV=sdumont
-  WORK_DIR=$SCRATCH/pnoc
+  WORK_DIR=$SCRATCH/single-stage
 else
   ENV=local
   WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
@@ -45,22 +45,23 @@ export PYTHONPATH=$(pwd)
 
 ## Architecture
 ### Priors
-ARCH=rn50
-ARCHITECTURE=resnet50
+ARCH=rs269
+ARCHITECTURE=resnest269
 TRAINABLE_STEM=false
-DILATED=false
+DILATED=true
 MODE=fix
 REGULAR=none
+LR=0.007
 
 # Training
 # LR=0.1  # defined in dataset.sh
 OPTIMIZER=sgd  # sgd,lion
-EPOCHS=15
+EPOCHS=30
 BATCH_SIZE=32
 ACCUMULATE_STEPS=1
 
 LR_ALPHA_SCRATCH=10.0
-LR_ALPHA_BIAS=2.0
+LR_ALPHA_BIAS=1.0
 
 # =========================
 # $PIP install lion-pytorch
@@ -136,6 +137,7 @@ train_singlestage() {
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
     --regularization $REGULAR \
+    --restore $RESTORE \
     --image_size $IMAGE_SIZE \
     --min_image_size $MIN_IMAGE_SIZE \
     --max_image_size $MAX_IMAGE_SIZE \
@@ -190,17 +192,14 @@ evaluate_priors() {
     --num_workers $WORKERS_INFER;
 }
 
-IMAGE_SIZE=64
-MAX_IMAGE_SIZE=80
-MIN_IMAGE_SIZE=50
-BATCH_SIZE=2
-ACCUMULATE_STEPS=1
+BATCH_SIZE=16
+ACCUMULATE_STEPS=2
 LABELSMOOTHING=0.1
 AUGMENT=colorjitter  # none for DeepGlobe
 
-LABELSMOOTHING=0.1
-
 EID=r1  # Experiment ID
+
+RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
 
 TAG=ss/$DATASET-$ARCH-lr$LR-rals-$EID
 train_singlestage
