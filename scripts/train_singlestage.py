@@ -116,6 +116,12 @@ def train_singlestage(args, wb_run, model_path):
   step_max = args.max_epoch * step_val
   print(f"Iterations: first={step_init} logging={step_log} validation={step_val} max={step_max}")
 
+  criterions = (
+    torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
+    torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
+    torch.nn.BCEWithLogitsLoss().to(DEVICE),
+  )
+
   # Network
   model = SingleStageModel(
     args.architecture,
@@ -126,9 +132,9 @@ def train_singlestage(args, wb_run, model_path):
     trainable_stem=args.trainable_stem,
     trainable_backbone=args.trainable_backbone,
     use_saliency_head=args.use_saliency_head,
-    criterion_c=torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
-    criterion_s=torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
-    criterion_b=torch.nn.BCEWithLogitsLoss().to(DEVICE),
+    criterion_c=criterions[0],
+    criterion_s=criterions[1],
+    criterion_b=criterions[2],
   )
 
   if args.restore:
@@ -181,7 +187,7 @@ def train_singlestage(args, wb_run, model_path):
         model,
         images.to(DEVICE),
         targets.to(DEVICE),
-        (model.criterion_c, model.criterion_s, model.criterion_b),
+        criterions,
         bg_t=bg_t,
         fg_t=fg_t,
         resize_align_corners=None,
