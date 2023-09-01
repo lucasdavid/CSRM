@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from multiprocessing import Pool
 
 import datasets
 import wandb
@@ -25,7 +26,7 @@ from tools.general.time_utils import *
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--tag', default='', type=str)
-parser.add_argument('--print_ratio', default=0.25, type=float)
+parser.add_argument('--print_ratio', default=0.05, type=float)
 parser.add_argument('--progress', default=True, type=str2bool)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--seed', default=0, type=int)
@@ -94,18 +95,12 @@ def to_2d(x):
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  tt, tv = datasets.get_classification_transforms(
-    args.min_image_size, args.max_image_size, args.image_size, args.augment
-  )
+  tt, tv = datasets.get_classification_transforms(args.min_image_size, args.max_image_size, args.image_size, args.augment)
   train_dataset = datasets.ClassificationDataset(ts, transform=tt)
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
-  train_dataset = datasets.apply_augmentation(
-    train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob
-  )
+  train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
 
-  train_loader = DataLoader(
-    train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True
-  )
+  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True)
   train_iterator = datasets.Iterator(train_loader)
   log_dataset(args.dataset, train_dataset, tt, tv)
@@ -119,7 +114,7 @@ def train_singlestage(args, wb_run, model_path):
   criterions = (
     torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
-    torch.nn.BCEWithLogitsLoss().to(DEVICE),
+    torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
   )
 
   # Network
@@ -167,9 +162,10 @@ def train_singlestage(args, wb_run, model_path):
   )
   scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
   log_opt_params("SingleStage", param_groups)
+  print("", flush=True)
 
   # Train
-  train_meter = MetricsContainer(['loss', 'loss_c', "loss_s", "loss_b", "loss_u"])
+  train_meter = MetricsContainer("loss loss_c loss_s loss_b loss_u".split())
   train_timer = Timer()
   miou_best = -1
 
@@ -181,12 +177,14 @@ def train_singlestage(args, wb_run, model_path):
     w_s = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
     w_u = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
     w_b = linear_schedule(step, step_max, 0.0, 1.0, 0.5)
+    # w_s = w_u = w_b = 0.0
 
     with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
       loss, metrics = train_step(
+        step,
         model,
-        images.to(DEVICE),
-        targets.to(DEVICE),
+        images,
+        targets,
         criterions,
         bg_t=bg_t,
         fg_t=fg_t,
@@ -195,7 +193,6 @@ def train_singlestage(args, wb_run, model_path):
         w_s=w_s,
         w_u=w_u,
         w_b=w_b,
-        device=DEVICE,
       )
 
     scaler.scale(loss / args.accumulate_steps).backward()
@@ -203,7 +200,7 @@ def train_singlestage(args, wb_run, model_path):
     if (step + 1) % args.accumulate_steps == 0:
       scaler.step(optimizer)
       scaler.update()
-      optimizer.zero_grad(set_to_none=True)  # set_to_none=False  # TODO: Try it with True and check performance.
+      optimizer.zero_grad(set_to_none=True)
 
     train_meter.update({m: v.item() for m, v in metrics.items()})
 
@@ -214,15 +211,22 @@ def train_singlestage(args, wb_run, model_path):
     if do_logging:
       learning_rate = float(get_learning_rate_from_optimizer(optimizer))
 
+      loss, loss_c, loss_s, loss_b, loss_u = train_meter.get(clear=True)
       data = {
         'iteration': step + 1,
         'learning_rate': learning_rate,
         'time': train_timer.tok(clear=True),
         "fg_t": fg_t,
         "bg_t": bg_t,
+        "loss": loss,
+        "loss_c": loss_c,
+        "loss_s": loss_s,
+        "loss_b": loss_b,
+        "loss_u": loss_u,
+        "w_s": w_s,
+        "w_u": w_u,
+        "w_b": w_b,
       }
-
-      data.update(train_meter.get(clear=True, as_map=True))
 
       wb_logs = {f"train/{k}": v for k, v in data.items()}
       wb_logs["train/epoch"] = epoch
@@ -257,7 +261,7 @@ def train_singlestage(args, wb_run, model_path):
 
       if metric_results["miou"] > miou_best:
         miou_best = metric_results["miou"]
-        for k in ("threshold", "miou", "iou"):
+        for k in ("miou", "iou"):
           wandb.run.summary[f"val/best_{k}"] = metric_results[k]
 
       save_model(model, model_path, parallel=GPUS_COUNT > 1)
@@ -267,6 +271,7 @@ def train_singlestage(args, wb_run, model_path):
 
 
 def train_step(
+  step,
   model,
   images,
   targets,
@@ -278,24 +283,21 @@ def train_step(
   w_s=1.0,
   w_u=1.0,
   w_b=1.0,
-  device="cuda"
 ):
   criterion_c, criterion_s, criterion_b = criterions
 
   # Forward
   logits, features, logits_saliency, logits_segm, logits_segm_res = model(
-    images, with_cam=True, with_mask=True, with_saliency=True
+    images.to(DEVICE), with_cam=True, with_mask=True, with_saliency=True
   )
 
   # (1) Classification loss.
-  loss_c = criterion_c(logits, label_smoothing(targets, ls))
+  loss_c = criterion_c(logits, label_smoothing(targets, ls).to(DEVICE))
 
   # (2) Segmentation loss.
-  pseudo_masks = get_pseudo_label(
-    images, features, targets, bg_t, fg_t, resize_align_corners, device
-  )
+  pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners)
 
-  loss_s = criterion_s(logits_segm_res, pseudo_masks)
+  loss_s = criterion_s(logits_segm_res, pseudo_masks.to(DEVICE))
 
   # (3) BG loss.
   pseudo_saliencies = (1 - torch.softmax(logits_segm, dim=1)[:, 0:1])
@@ -303,16 +305,34 @@ def train_step(
   loss_b = criterion_b(logits_saliency, pseudo_saliencies)
 
   # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
-  y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0))  # Mark background=0 (occurs). # B, C
+  y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
   pixels_u = pseudo_masks == 255  # [B, H, W]
-  loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
-  loss_u = -y_n * torch.log(loss_u)  # [A, B]
-  loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1)
-  loss_u = loss_u[pixels_u].mean()
 
-  loss = loss_c + w_s * loss_s + w_u * loss_u + w_b * loss_b
+  if pixels_u.sum().item() == 0:
+    loss_u = 0
+  else:
+    loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
+    loss_u = -y_n * torch.log(loss_u)  # [A, B]
+    loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
+    loss_u = loss_u[pixels_u].mean()
+
+  # if torch.isnan(loss_c):
+  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
+  #   loss_c = 0
+  # if torch.isnan(loss_s):
+  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
+  #   loss_s = 0
+  # if torch.isnan(loss_u):
+  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
+  #   loss_u = 0
+  # if torch.isnan(loss_b):
+  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
+  #   loss_b = 0
+
+  loss = loss_c + w_s * loss_s  + w_u * loss_u + w_b * loss_b
 
   losses_values = {
+    "loss": loss,
     "loss_c": loss_c,
     "loss_s": loss_s,
     "loss_b": loss_b,
@@ -322,39 +342,45 @@ def train_step(
   return loss, losses_values
 
 
-def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None, device="cuda"):
+def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None):
   sizes = images.shape[2:]
+
+  cams = cams.cpu().to(torch.float32) * to_2d(targets)
+  cams = make_cam(cams, inplace=True, global_norm=True)
+  cams = resize_tensor(cams, sizes, align_corners=resize_align_corners)
+  cams = to_numpy(cams)
+
   images = to_numpy(images)
-  # targets = to_numpy(targets)
-  # cams = to_numpy(cams)
+  targets = to_numpy(targets)
 
-  masks = []
+  with Pool(processes=len(images)) as pool:
+    args = [(i, c, t, bg_t, fg_t) for i, c, t in zip(images, cams, targets)]
+    masks = pool.map(_get_pseudo_label, args)
 
-  for image, cam, target in zip(images, cams.cpu().to(torch.float32), targets.cpu()):
-    labels = target > 0.5
-    cam = cam[labels]
-    cam = make_cam(cam, inplace=True, global_norm=True)
-    cam = resize_tensor(cam[None, ...], sizes, align_corners=resize_align_corners)[0]
-    cam = to_numpy(cam)
-    keys = np.concatenate(([0], np.where(labels)[0]))
+  return torch.as_tensor(np.asarray(masks, dtype="int64"))
 
-    image = denormalize(image, *datasets.imagenet_stats())
+def _get_pseudo_label(args):
+  image, cam, target, bg_t, fg_t = args
+  image = denormalize(image, *datasets.imagenet_stats())
 
-    fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
-    fg_cam = np.argmax(fg_cam, axis=0)
-    fg_conf = keys[crf_inference_label(image, fg_cam, n_labels=keys.shape[0])]
+  labels = target > 0.5
+  cam = cam[labels]
+  keys = np.concatenate(([0], np.where(labels)[0]))
 
-    bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
-    bg_cam = np.argmax(bg_cam, axis=0)
-    bg_conf = keys[crf_inference_label(image, bg_cam, n_labels=keys.shape[0])]
+  fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
+  fg_cam = np.argmax(fg_cam, axis=0)
+  fg_conf = keys[crf_inference_label(image, fg_cam, n_labels=keys.shape[0])]
 
-    mask = fg_conf.copy()
-    mask[fg_conf == 0] = 255
-    mask[bg_conf + fg_conf == 0] = 0
+  bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
+  bg_cam = np.argmax(bg_cam, axis=0)
+  bg_conf = keys[crf_inference_label(image, bg_cam, n_labels=keys.shape[0])]
 
-    masks.append(mask)
+  mask = fg_conf.copy()
+  mask[fg_conf == 0] = 255
+  mask[bg_conf + fg_conf == 0] = 0
 
-  return torch.as_tensor(np.asarray(masks, dtype="int64"), device=device)
+  return mask
+
 
 
 if __name__ == '__main__':

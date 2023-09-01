@@ -75,10 +75,11 @@ class SingleStageModel(Backbone):
     return features, features_s2
 
   def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True):
-    features, features_s2 = self.forward_features(inputs)
-    outputs = self.classification_branch(features, with_cam=with_cam)
+    features_s5, features_s2 = self.forward_features(inputs)
+    outputs = self.classification_branch(features_s5, with_cam=with_cam or with_saliency)
 
     if with_saliency:
+      _, features = outputs
       if self.use_saliency_head:
         logits_saliency = self.saliency_head(features)
       else:
@@ -87,7 +88,7 @@ class SingleStageModel(Backbone):
       outputs = (*outputs, logits_saliency)
 
     if with_mask:
-      masks = self.segmentation_branch(features, features_s2)
+      masks = self.segmentation_branch(features_s5, features_s2)
       masks_resized = resize_tensor(masks, inputs.size()[2:], align_corners=True)
 
       outputs = (*outputs, masks, masks_resized)
