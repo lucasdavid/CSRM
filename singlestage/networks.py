@@ -93,7 +93,7 @@ class SingleStageModel(Backbone):
 
       outputs = (*outputs, masks, masks_resized)
 
-    return outputs
+    return outputs[0] if len(outputs) == 1 else outputs
 
   def segmentation_branch(self, features, features_s2):
     features = self.aspp(features)
@@ -109,7 +109,7 @@ class SingleStageModel(Backbone):
     else:
       features = gap2d(features, keepdims=True)
       logits = self.classifier(features).view(-1, self.num_classes)
-      return logits
+      return (logits,)
 
 
 if __name__ == "__main__":

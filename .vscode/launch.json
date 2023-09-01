@@ -15,12 +15,14 @@
         "PYTHONPATH": "/mnt/08e675df-1814-4d6d-bafa-7ffe8158fc7e/workspace/repos/research/wsss/single-stage"
       },
       "args": [
-        "--architecture", "resnet50", "--batch_size", "8", "--image_size", "256",
-        "--min_image_size", "224",
-        "--lr", "0.01", "--wd", "0.001", "--mode", "fix", "--trainable-stem", "false",
+        "--architecture", "resnet50", "--batch_size", "8",
+        "--image_size", "256", "--min_image_size", "224", "--max_image_size", "320",
+        "--lr", "0.01", "--wd", "0.001", "--mode", "fix", "--trainable-stem", "false", "--use_gn", "true",
         "--restore", "experiments/models/cam/ResNet50.pth",
         // "--lr_alpha_scratch", "1.0", "--lr_alpha_bias", "1.0",
-        "--data_dir", "/mnt/08e675df-1814-4d6d-bafa-7ffe8158fc7e/workspace/datasets/VOCdevkit/VOC2012"
+        "--data_dir", "/mnt/08e675df-1814-4d6d-bafa-7ffe8158fc7e/workspace/datasets/VOCdevkit/VOC2012",
+        "--validate_max_steps", "2", "--progress", "false",
+        "--use_saliency_head", "true"
       ],
       "justMyCode": false
     }

@@ -10,7 +10,6 @@ from multiprocessing import Pool
 import datasets
 import wandb
 from core.networks import *
-from core.training import segmentation_validation_step
 from singlestage import SingleStageModel
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *
@@ -106,7 +105,7 @@ def train_singlestage(args, wb_run, model_path):
   log_dataset(args.dataset, train_dataset, tt, tv)
 
   step_val = len(train_loader)
-  step_log = int(step_val * args.print_ratio)
+  step_log = int(max(step_val * args.print_ratio, 1))
   step_init = args.first_epoch * step_val
   step_max = args.max_epoch * step_val
   print(f"Iterations: first={step_init} logging={step_log} validation={step_val} max={step_max}")
@@ -172,8 +171,10 @@ def train_singlestage(args, wb_run, model_path):
   for step in tqdm(range(step_init, step_max), 'Training', mininterval=2.0, disable=not args.progress):
     _, images, targets = train_iterator.get()
 
-    bg_t = linear_schedule(step, step_max, 0.001, 0.5, 1.0)
-    fg_t = linear_schedule(step, step_max, 0.999, 0.5, 1.0, constraint=max)
+    # bg_t = linear_schedule(step, step_max, 0.001, 0.3, 1.0)
+    # fg_t = linear_schedule(step, step_max, 0.5, 0.3, 1.0, constraint=max)
+    bg_t = 0.05
+    fg_t = 0.3
     w_s = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
     w_u = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
     w_b = linear_schedule(step, step_max, 0.0, 1.0, 0.5)
@@ -246,8 +247,8 @@ def train_singlestage(args, wb_run, model_path):
     if do_validation:
       model.eval()
       with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-        metric_results = segmentation_validation_step(
-          lambda inputs: model(inputs)[-1],
+        metric_results = valid_step(
+          model,
           valid_loader,
           valid_dataset.info,
           DEVICE,
@@ -278,7 +279,7 @@ def train_step(
   criterions,
   bg_t=0.05,
   fg_t=0.3,
-  resize_align_corners=None,
+  resize_align_corners=True,
   ls=0.0,
   w_s=1.0,
   w_u=1.0,
@@ -297,24 +298,30 @@ def train_step(
   # (2) Segmentation loss.
   pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners)
 
+  pixels_u = pseudo_masks == 255
+  pixels_b = pseudo_masks == 0
+  pseudo_masks[pixels_b] = 255  # Ignore BG.
+
   loss_s = criterion_s(logits_segm_res, pseudo_masks.to(DEVICE))
 
-  # (3) BG loss.
-  pseudo_saliencies = (1 - torch.softmax(logits_segm, dim=1)[:, 0:1])
-  logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
-  loss_b = criterion_b(logits_saliency, pseudo_saliencies)
+  loss_u = loss_b = torch.zeros(())
+  # loss_u = 0
 
-  # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
-  y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
-  pixels_u = pseudo_masks == 255  # [B, H, W]
+  # # (3) BG loss.
+  # pseudo_saliencies = torch.softmax(logits_segm.detach(), dim=1)[:, 1:].max(dim=1, keepdim=True)[0]
+  # logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
+  # loss_b = criterion_b(logits_saliency, pseudo_saliencies)
 
-  if pixels_u.sum().item() == 0:
-    loss_u = 0
-  else:
-    loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
-    loss_u = -y_n * torch.log(loss_u)  # [A, B]
-    loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
-    loss_u = loss_u[pixels_u].mean()
+  # # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
+  # y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
+
+  # if pixels_u.sum() == 0:
+  #   loss_u = 0
+  # else:
+  #   loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
+  #   loss_u = -y_n * torch.log(loss_u)  # [A, B]
+  #   loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
+  #   loss_u = loss_u[pixels_u].mean()
 
   # if torch.isnan(loss_c):
   #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
@@ -340,6 +347,52 @@ def train_step(
   }
 
   return loss, losses_values
+
+def valid_step(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    info: datasets.DatasetInfo,
+    device: str,
+    log_samples: bool = True,
+    max_steps: Optional[int] = None,
+):
+  classes = [c for i, c in enumerate(info.classes) if i != info.void_class]
+
+  start = time.time()
+  meter = MIoUCalculator(classes, bg_class=info.bg_class, include_bg=False)
+
+  with torch.no_grad():
+    for step, (ids, inputs, targets, masks) in enumerate(loader):
+      _, H, W = masks.shape
+
+      logits, mask, mask_resized = model(inputs.to(device), with_mask=True)
+      preds = torch.argmax(mask_resized, dim=1).cpu()
+      preds = resize_tensor(preds.float().unsqueeze(1), (H, W), mode="nearest").squeeze().to(masks)
+      preds = to_numpy(preds)
+      masks = to_numpy(masks)
+
+      meter.add_many(preds, masks)
+
+      if step == 0 and log_samples:
+        inputs = to_numpy(inputs)
+        wandb_utils.log_masks(ids, inputs, targets, masks, preds, info.classes, void_class=info.void_class)
+
+      if max_steps and step >= max_steps:
+        break
+
+  miou, miou_fg, iou, FP, FN = meter.get(clear=True, detail=True)
+  iou = [round(iou[c], 2) for c in classes]
+
+  elapsed = time.time() - start
+
+  return {
+    "miou": miou,
+    "miou_fg": miou_fg,
+    "iou": iou,
+    "fp": FP,
+    "fn": FN,
+    "time": elapsed,
+  }
 
 
 def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None):
