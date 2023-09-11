@@ -101,11 +101,11 @@ def train_singlestage(args, wb_run, model_path):
 
   train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True)
-  train_iterator = datasets.Iterator(train_loader)
+  # train_iterator = datasets.Iterator(train_loader)
   log_dataset(args.dataset, train_dataset, tt, tv)
 
   step_val = len(train_loader)
-  step_log = int(max(step_val * args.print_ratio, 1))
+  step_log = max(int(step_val * args.print_ratio), 1)
   step_init = args.first_epoch * step_val
   step_max = args.max_epoch * step_val
   print(f"Iterations: first={step_init} logging={step_log} validation={step_val} max={step_max}")
@@ -113,7 +113,7 @@ def train_singlestage(args, wb_run, model_path):
   criterions = (
     torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
-    torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
+    L1_Loss,  # torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
   )
 
   # Network
@@ -153,9 +153,10 @@ def train_singlestage(args, wb_run, model_path):
   optimizer = get_optimizer(
     args.lr,
     args.wd,
-    int(step_max // args.accumulate_steps),
     param_groups,
     algorithm=args.optimizer,
+    start_step=int(step_init // args.accumulate_step),
+    max_step=int(step_max // args.accumulate_steps),
     alpha_scratch=args.lr_alpha_scratch,
     alpha_bias=args.lr_alpha_bias
   )
@@ -168,81 +169,72 @@ def train_singlestage(args, wb_run, model_path):
   train_timer = Timer()
   miou_best = -1
 
-  for step in tqdm(range(step_init, step_max), 'Training', mininterval=2.0, disable=not args.progress):
-    _, images, targets = train_iterator.get()
+  for epoch in range(args.first_epoch, args.max_epoch):
+    for step, batch in tqdm(enumerate(train_loader), f"Epoch {epoch}", mininterval=2.0, disable=not args.progress):
+      _, images, targets = batch
 
-    # bg_t = linear_schedule(step, step_max, 0.001, 0.3, 1.0)
-    # fg_t = linear_schedule(step, step_max, 0.5, 0.3, 1.0, constraint=max)
-    bg_t = 0.05
-    fg_t = 0.3
-    w_s = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
-    w_u = linear_schedule(step, step_max, 0.5, 1.0, 0.5)
-    w_b = linear_schedule(step, step_max, 0.0, 1.0, 0.5)
-    # w_s = w_u = w_b = 0.0
+      optimizer
 
-    with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-      loss, metrics = train_step(
-        step,
-        model,
-        images,
-        targets,
-        criterions,
-        bg_t=bg_t,
-        fg_t=fg_t,
-        resize_align_corners=None,
-        ls=args.label_smoothing,
-        w_s=w_s,
-        w_u=w_u,
-        w_b=w_b,
-      )
+      # fg_t = linear_schedule(step, step_max, 0.5, 0.3, 1.0, constraint=max)
+      # bg_t = linear_schedule(step, step_max, 0.001, 0.3, 1.0)
+      fg_t = 0.30
+      bg_t = 0.05
+      w_s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+      w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+      w_b = linear_schedule(optimizer.global_step, optimizer.max_step, 0.0, 1.0, 0.5)
+      # w_s = w_u = w_b = 0.0
 
-    scaler.scale(loss / args.accumulate_steps).backward()
+      with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
+        loss, metrics = train_step(
+          step,
+          model,
+          images,
+          targets,
+          criterions,
+          thresholds=(bg_t, fg_t),
+          align_corners=True,
+          ls=args.label_smoothing,
+          w_s=w_s,
+          w_u=w_u,
+          w_b=w_b,
+        )
 
-    if (step + 1) % args.accumulate_steps == 0:
-      scaler.step(optimizer)
-      scaler.update()
-      optimizer.zero_grad(set_to_none=True)
+      scaler.scale(loss / args.accumulate_steps).backward()
 
-    train_meter.update({m: v.item() for m, v in metrics.items()})
+      if (step + 1) % args.accumulate_steps == 0:
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
 
-    epoch = step // step_val
-    do_logging = (step + 1) % step_log == 0
-    do_validation = args.validate and (step + 1) % step_val == 0
+      train_meter.update({m: v.item() for m, v in metrics.items()})
 
-    if do_logging:
-      learning_rate = float(get_learning_rate_from_optimizer(optimizer))
+      do_logging = (step + 1) % step_log == 0
+      do_validation = args.validate and (step + 1) == step_val
 
-      loss, loss_c, loss_s, loss_b, loss_u = train_meter.get(clear=True)
-      data = {
-        'iteration': step + 1,
-        'learning_rate': learning_rate,
-        'time': train_timer.tok(clear=True),
-        "fg_t": fg_t,
-        "bg_t": bg_t,
-        "loss": loss,
-        "loss_c": loss_c,
-        "loss_s": loss_s,
-        "loss_b": loss_b,
-        "loss_u": loss_u,
-        "w_s": w_s,
-        "w_u": w_u,
-        "w_b": w_b,
-      }
+      if do_logging:
+        lr = float(get_learning_rate_from_optimizer(optimizer))
 
-      wb_logs = {f"train/{k}": v for k, v in data.items()}
-      wb_logs["train/epoch"] = epoch
-      wandb.log(wb_logs, commit=not do_validation)
+        loss, loss_c, loss_s, loss_b, loss_u = train_meter.get(clear=True)
+        data = {
+          'step': step + 1,
+          "epoch": epoch + 1,
+          'lr': lr,
+          'time': train_timer.tok(clear=True),
+          "fg_t": fg_t,
+          "bg_t": bg_t,
+          "loss": loss,
+          "loss_c": loss_c,
+          "loss_s": loss_s,
+          "loss_b": loss_b,
+          "loss_u": loss_u,
+          "w_s": w_s,
+          "w_u": w_u,
+          "w_b": w_b,
+        }
 
-      print(
-        "step={iteration:,} "
-        "lr={learning_rate:.4f} "
-        "loss={loss:.4f} "
-        "loss_c={loss_c:.4f} "
-        "loss_s={loss_s:.4f} "
-        "loss_b={loss_b:.4f} "
-        "loss_u={loss_u:.4f} "
-        "time={time:.0f}sec".format(**data)
-      )
+        wb_logs = {f"train/{k}": v for k, v in data.items()}
+        wandb.log(wb_logs, commit=not do_validation)
+        print(f"epoch=[{epoch+1}/{args.max_epoch}] step=[{step}/{step_val}] loss={loss} loss_c={loss_c} loss_b={loss_b} loss_u={loss_u}")
 
     if do_validation:
       model.eval()
@@ -277,68 +269,55 @@ def train_step(
   images,
   targets,
   criterions,
-  bg_t=0.05,
-  fg_t=0.3,
-  resize_align_corners=True,
+  thresholds,
+  align_corners=None,
   ls=0.0,
   w_s=1.0,
   w_u=1.0,
   w_b=1.0,
 ):
   criterion_c, criterion_s, criterion_b = criterions
+  bg_t, fg_t = thresholds
 
   # Forward
-  logits, features, logits_saliency, logits_segm, logits_segm_res = model(
-    images.to(DEVICE), with_cam=True, with_mask=True, with_saliency=True
+  logits, features, saliencies, segms = model(
+    images.to(DEVICE), with_mask=True, with_saliency=True, resize_mask=False
   )
 
   # (1) Classification loss.
   loss_c = criterion_c(logits, label_smoothing(targets, ls).to(DEVICE))
 
   # (2) Segmentation loss.
-  pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners)
+  pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, align_corners)
+  pseudo_masks = resize_tensor(pseudo_masks, segms.shape[2:], "nearest", align_corners)
 
   pixels_u = pseudo_masks == 255
   pixels_b = pseudo_masks == 0
   pseudo_masks[pixels_b] = 255  # Ignore BG.
 
-  loss_s = criterion_s(logits_segm_res, pseudo_masks.to(DEVICE))
+  loss_s = criterion_s(segms, pseudo_masks.to(DEVICE))
 
-  loss_u = loss_b = torch.zeros(())
-  # loss_u = 0
+  # (3) Consistency loss.
+  if not w_b:
+    loss_b = torch.zeros(())
+  else:
+    segm1 = torch.concat((saliencies, logits), dim=1)  # B(C+1)HW
+    segm1 = resize_tensor(segm1, segms.shape[2:], "bilinear", align_corners)
+    loss_b = criterion_b(segm1, segms)
 
-  # # (3) BG loss.
-  # pseudo_saliencies = torch.softmax(logits_segm.detach(), dim=1)[:, 1:].max(dim=1, keepdim=True)[0]
-  # logits_saliency = resize_tensor(logits_saliency, pseudo_saliencies.shape[2:], align_corners=True)
-  # loss_b = criterion_b(logits_saliency, pseudo_saliencies)
-
-  # # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
-  # y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
-
-  # if pixels_u.sum() == 0:
-  #   loss_u = 0
-  # else:
-  #   loss_u = torch.clamp(1 - torch.sigmoid(logits_segm_res), min=0.0005, max=0.9995)
-  #   loss_u = -y_n * torch.log(loss_u)  # [A, B]
-  #   loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
-  #   loss_u = loss_u[pixels_u].mean()
-
-  # if torch.isnan(loss_c):
-  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
-  #   loss_c = 0
-  # if torch.isnan(loss_s):
-  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
-  #   loss_s = 0
-  # if torch.isnan(loss_u):
-  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
-  #   loss_u = 0
-  # if torch.isnan(loss_b):
-  #   print(f"step={step} loss_c={loss_c} loss_s={loss_s} loss_u={loss_u} loss_b={loss_b}")
-  #   loss_b = 0
+  # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
+  if not w_u or pixels_u.sum() == 0:
+    loss_u = torch.zeros(())
+  else:
+    y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
+    loss_u = torch.clamp(1 - torch.sigmoid(segms), min=0.0005, max=0.9995)
+    loss_u = -y_n * torch.log(loss_u)  # [A, B]
+    loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
+    loss_u = loss_u[pixels_u].mean()
 
   loss = loss_c + w_s * loss_s  + w_u * loss_u + w_b * loss_b
 
-  losses_values = {
+  metrics = {
     "loss": loss,
     "loss_c": loss_c,
     "loss_s": loss_s,
@@ -346,7 +325,7 @@ def train_step(
     "loss_u": loss_u,
   }
 
-  return loss, losses_values
+  return loss, metrics
 
 def valid_step(
     model: torch.nn.Module,
@@ -365,9 +344,10 @@ def valid_step(
     for step, (ids, inputs, targets, masks) in enumerate(loader):
       _, H, W = masks.shape
 
-      logits, mask, mask_resized = model(inputs.to(device), with_mask=True)
-      preds = torch.argmax(mask_resized, dim=1).cpu()
-      preds = resize_tensor(preds.float().unsqueeze(1), (H, W), mode="nearest").squeeze().to(masks)
+      _, pred_masks = model(inputs.to(device), with_mask=True)
+      preds = torch.argmax(pred_masks, dim=1).cpu()
+
+      masks = resize_tensor(masks, preds.shape[2:], mode="nearest")
       preds = to_numpy(preds)
       masks = to_numpy(masks)
 
@@ -399,7 +379,7 @@ def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_co
   sizes = images.shape[2:]
 
   cams = cams.cpu().to(torch.float32) * to_2d(targets)
-  cams = make_cam(cams, inplace=True, global_norm=True)
+  cams = make_cam(cams, inplace=True, global_norm=False)
   cams = resize_tensor(cams, sizes, align_corners=resize_align_corners)
   cams = to_numpy(cams)
 

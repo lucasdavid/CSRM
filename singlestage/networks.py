@@ -74,24 +74,26 @@ class SingleStageModel(Backbone):
 
     return features, features_s2
 
-  def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True):
+  def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True, resize_mask=False):
     features_s5, features_s2 = self.forward_features(inputs)
     outputs = self.classification_branch(features_s5, with_cam=with_cam or with_saliency)
 
     if with_saliency:
       _, features = outputs
+
       if self.use_saliency_head:
         logits_saliency = self.saliency_head(features)
       else:
         logits_saliency = features.sum(dim=1, keepdim=True)
 
-      outputs = (*outputs, logits_saliency)
+      outputs += [logits_saliency]
 
     if with_mask:
       masks = self.segmentation_branch(features_s5, features_s2)
-      masks_resized = resize_tensor(masks, inputs.size()[2:], align_corners=True)
+      if resize_mask:
+        masks = resize_tensor(masks, inputs.shape[2:], align_corners=True)
 
-      outputs = (*outputs, masks, masks_resized)
+      outputs += [masks]
 
     return outputs[0] if len(outputs) == 1 else outputs
 
@@ -105,11 +107,11 @@ class SingleStageModel(Backbone):
     if with_cam:
       features = self.classifier(features)
       logits = gap2d(features)
-      return logits, features
-    else:
-      features = gap2d(features, keepdims=True)
-      logits = self.classifier(features).view(-1, self.num_classes)
-      return (logits,)
+      return [logits, features]
+
+    features = gap2d(features, keepdims=True)
+    logits = self.classifier(features).view(-1, self.num_classes)
+    return [logits]
 
 
 if __name__ == "__main__":
