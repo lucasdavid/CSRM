@@ -16,6 +16,7 @@ class SingleStageModel(Backbone):
     self,
     model_name,
     num_classes=20,
+    num_classes_segm=None,
     mode='fix',
     dilated=True,
     strides=None,
@@ -41,7 +42,7 @@ class SingleStageModel(Backbone):
     norm_fn = group_norm if use_group_norm else nn.BatchNorm2d
 
     self.aspp = ASPP(in_features, output_stride=16, norm_fn=norm_fn)
-    self.decoder = Decoder(num_classes + 1, 256, norm_fn)
+    self.decoder = Decoder(num_classes_segm or (num_classes + 1), 256, norm_fn)
 
     self.num_classes = num_classes
     self.regularization = regularization
@@ -54,7 +55,7 @@ class SingleStageModel(Backbone):
     self.from_scratch_layers.extend([self.classifier] + list(self.aspp.modules()) + list(self.decoder.modules()))
 
     if use_saliency_head:
-      self.saliency_head = nn.Conv2d(num_classes, 1, 1)
+      self.saliency_head = nn.Conv2d(cin, 1, 1, bias=False)
       self.initialize([self.saliency_head])
       self.from_scratch_layers.append(self.saliency_head)
 
@@ -74,7 +75,7 @@ class SingleStageModel(Backbone):
 
     return features, features_s2
 
-  def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True, resize_mask=False):
+  def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True, resize_mask=True):
     features_s5, features_s2 = self.forward_features(inputs)
     outputs = self.classification_branch(features_s5, with_cam=with_cam or with_saliency)
 
@@ -82,7 +83,7 @@ class SingleStageModel(Backbone):
       _, features = outputs
 
       if self.use_saliency_head:
-        logits_saliency = self.saliency_head(features)
+        logits_saliency = self.saliency_head(features_s5)
       else:
         logits_saliency = features.sum(dim=1, keepdim=True)
 

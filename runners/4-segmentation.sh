@@ -27,7 +27,7 @@
 # ENV=sdumont
 # WORK_DIR=$SCRATCH/PuzzleCAM
 ENV=local
-WORK_DIR=$HOME/workspace/repos/research/pnoc
+WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
 
 # Dataset
 # DATASET=voc12  # Pascal VOC 2012
@@ -41,17 +41,15 @@ cd $WORK_DIR
 export PYTHONPATH=$(pwd)
 
 # Architecture
-# ARCH=rs269
-# ARCHITECTURE=resnest269
-ARCH=rs101
-ARCHITECTURE=resnest101
+ARCH=rs269
+ARCHITECTURE=resnest269
 GROUP_NORM=true
 DILATED=false
 MODE=fix
 
 # LR=0.007  # voc12
 # LR=0.004  # coco14
-# LR=0.001  # deepglobe
+LR=0.001  # deepglobe
 
 IMAGE_SIZE=320
 MIN_IMAGE_SIZE=$IMAGE_SIZE
@@ -153,7 +151,13 @@ evaluate_masks() {
 ## 4.1 DeepLabV3+ Training
 ##
 
-LABELSMOOTHING=0.1
+ARCH=rn101
+ARCHITECTURE=resnet101
+# LR=0.01  # deepglobe
+DILATED=true
+BATCH_SIZE=10
+ACCUMULATE_STEPS=1
+LABELSMOOTHING=0
 
 ## For supervised segmentation:
 PRIORS_TAG=sup
@@ -163,32 +167,17 @@ MASKS_DIR=""
 # PRIORS_TAG=pnoc-ccamh-rw
 # MASKS_DIR=./experiments/predictions/rw/$DATASET-an@ccamh@rs269-pnoc@beta=10@exp_times=8@rw@crf=$CRF_T
 
-TAG=segmentation/$DATASET-$IMAGE_SIZE-d3p-lr$LR-ls-$PRIORS_TAG
-# segm_training
+TAG=segmentation/$DATASET-$IMAGE_SIZE-d3p-lr$LR-$PRIORS_TAG
+segm_training
 
 ## 4.2 DeepLabV3+ Inference
 ##
 
 # CRF_T=1 DOMAIN=$DOMAIN_TRAIN SEGM_PRED_DIR=./experiments/predictions/$TAG segm_inference
-# CRF_T=1 DOMAIN=$DOMAIN_VALID_SEG SEGM_PRED_DIR=./experiments/predictions/$TAG segm_inference
+CRF_T=1 DOMAIN=$DOMAIN_VALID_SEG SEGM_PRED_DIR=./experiments/predictions/$TAG segm_inference
 # CRF_T=1 DOMAIN=$DOMAIN_TEST SEGM_PRED_DIR=./experiments/predictions/$TAG segm_inference
 
 ## 4.3. Evaluation
 ##
 
-# DOMAIN=$DOMAIN_VALID_SEG EVAL_MODE=png evaluate_masks
-
-# region Deep-Globe Land Cover
-## LR and augmentation search
-## ==========================
-LRS="0.1 0.01 0.001"
-AUGMENTS="none clahe clahe_cutmix"
-
-for LR in $LRS; do
-  for AUGMENT in $AUGMENTS; do
-    TAG=segmentation/$DATASET-$IMAGE_SIZE-d3p-lr$LR-ls-$AUGMENT-sup
-    # segm_training
-  done
-done
-
-# endregion
+DOMAIN=$DOMAIN_VALID_SEG EVAL_MODE=png evaluate_masks

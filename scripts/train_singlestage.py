@@ -1,11 +1,13 @@
 import argparse
 import os
+from multiprocessing import Pool
+from typing import List
 
 import numpy as np
+import sklearn.metrics as skmetrics
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from multiprocessing import Pool
 
 import datasets
 import wandb
@@ -18,14 +20,14 @@ from tools.ai.log_utils import *
 from tools.ai.optim_utils import *
 from tools.ai.randaugment import *
 from tools.ai.torch_utils import *
-from tools.general import wandb_utils
 from tools.general.io_utils import *
 from tools.general.time_utils import *
+from tools.general import wandb_utils
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--tag', default='', type=str)
-parser.add_argument('--print_ratio', default=0.05, type=float)
+parser.add_argument('--tag', type=str, required=True)
+parser.add_argument('--print_ratio', default=0.25, type=float)
 parser.add_argument('--progress', default=True, type=str2bool)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--seed', default=0, type=int)
@@ -63,6 +65,8 @@ parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--wd', default=1e-4, type=float)
 parser.add_argument('--label_smoothing', default=0, type=float)
 parser.add_argument('--optimizer', default="sgd", choices=["sgd", "lion"])
+parser.add_argument('--momentum', default=.9, type=float)
+parser.add_argument('--nesterov', default=True, type=str2bool)
 parser.add_argument('--lr_alpha_scratch', default=10., type=float)
 parser.add_argument('--lr_alpha_bias', default=2., type=float)
 
@@ -73,6 +77,10 @@ parser.add_argument('--max_image_size', default=640, type=int)
 parser.add_argument('--augment', default='', type=str)
 parser.add_argument('--cutmix_prob', default=1.0, type=float)
 parser.add_argument('--mixup_prob', default=1.0, type=float)
+
+# Single-Stage
+parser.add_argument('--loss_b', default='l1', choices=["l1", "kld"])
+
 
 import cv2
 
@@ -94,14 +102,13 @@ def to_2d(x):
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  tt, tv = datasets.get_classification_transforms(args.min_image_size, args.max_image_size, args.image_size, args.augment)
-  train_dataset = datasets.ClassificationDataset(ts, transform=tt)
+  tt, tv = datasets.get_segmentation_transforms(args.min_image_size, args.max_image_size, args.image_size, args.augment)
+  train_dataset = datasets.SegmentationDataset(ts, transform=tt)
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
   train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
 
   train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True)
-  # train_iterator = datasets.Iterator(train_loader)
   log_dataset(args.dataset, train_dataset, tt, tv)
 
   step_val = len(train_loader)
@@ -113,13 +120,14 @@ def train_singlestage(args, wb_run, model_path):
   criterions = (
     torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
-    L1_Loss,  # torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
+    torch.nn.L1Loss() if args.loss_b == "l1" else torch.nn.KLDivLoss(log_target=True, reduction="batchmean"),
   )
 
   # Network
   model = SingleStageModel(
     args.architecture,
-    train_dataset.info.num_classes,
+    num_classes=ts.classification_info.num_classes,
+    num_classes_segm=ts.segmentation_info.num_classes,
     mode=args.mode,
     dilated=args.dilated,
     use_group_norm=args.use_gn,
@@ -153,10 +161,12 @@ def train_singlestage(args, wb_run, model_path):
   optimizer = get_optimizer(
     args.lr,
     args.wd,
-    param_groups,
-    algorithm=args.optimizer,
-    start_step=int(step_init // args.accumulate_step),
+    momentum=args.momentum,
+    nesterov=args.nesterov,
+    start_step=int(step_init // args.accumulate_steps),
     max_step=int(step_max // args.accumulate_steps),
+    param_groups=param_groups,
+    algorithm=args.optimizer,
     alpha_scratch=args.lr_alpha_scratch,
     alpha_bias=args.lr_alpha_bias
   )
@@ -170,18 +180,18 @@ def train_singlestage(args, wb_run, model_path):
   miou_best = -1
 
   for epoch in range(args.first_epoch, args.max_epoch):
-    for step, batch in tqdm(enumerate(train_loader), f"Epoch {epoch}", mininterval=2.0, disable=not args.progress):
-      _, images, targets = batch
-
-      optimizer
+    for step, batch in enumerate(tqdm(train_loader, mininterval=2.0, disable=not args.progress, ncols=10)):
+      _, images, targets, true_masks = batch
 
       # fg_t = linear_schedule(step, step_max, 0.5, 0.3, 1.0, constraint=max)
       # bg_t = linear_schedule(step, step_max, 0.001, 0.3, 1.0)
-      fg_t = 0.30
+      fg_t = 0.40
       bg_t = 0.05
-      w_s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
-      w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
-      w_b = linear_schedule(optimizer.global_step, optimizer.max_step, 0.0, 1.0, 0.5)
+      # w_s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+      w_s = 1
+      # w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+      # w_b = linear_schedule(optimizer.global_step, optimizer.max_step, 0.0, 1.0, 0.5)
+      w_u = w_b = 0
       # w_s = w_u = w_b = 0.0
 
       with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
@@ -190,13 +200,14 @@ def train_singlestage(args, wb_run, model_path):
           model,
           images,
           targets,
+          true_masks,
           criterions,
           thresholds=(bg_t, fg_t),
-          align_corners=True,
           ls=args.label_smoothing,
           w_s=w_s,
           w_u=w_u,
           w_b=w_b,
+          bg_class=ts.segmentation_info.bg_class,
         )
 
       scaler.scale(loss / args.accumulate_steps).backward()
@@ -234,32 +245,35 @@ def train_singlestage(args, wb_run, model_path):
 
         wb_logs = {f"train/{k}": v for k, v in data.items()}
         wandb.log(wb_logs, commit=not do_validation)
-        print(f"epoch=[{epoch+1}/{args.max_epoch}] step=[{step}/{step_val}] loss={loss} loss_c={loss_c} loss_b={loss_b} loss_u={loss_u}")
+        print(f" loss={loss:.5f} loss_c={loss_c:.5f} loss_s={loss_s:.5f} loss_b={loss_b:.5f} loss_u={loss_u:.5f}")
 
-    if do_validation:
-      model.eval()
-      with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-        metric_results = valid_step(
-          model,
-          valid_loader,
-          valid_dataset.info,
-          DEVICE,
-          log_samples=True,
-        )
-      metric_results["iteration"] = step + 1
-      model.train()
+    # region Evaluation
+    model.eval()
+    with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
+      metric_results = valid_step(
+        model,
+        valid_loader,
+        ts,
+        THRESHOLDS,
+        DEVICE,
+        log_samples=True,
+      )
+      metric_results.update({"iteration": step+1, "epoch": epoch+1})
+    model.train()
 
-      wandb.log({f"val/{k}": v for k, v in metric_results.items()})
-      print(*(f"{metric}={value}" for metric, value in metric_results.items()))
+    wandb.log({f"val/{k}": v for k, v in metric_results.items()})
+    print(f"[Epoch {epoch}/{args.max_epoch}]",
+          *(f"{m}={v:.5f}" if isinstance(v, float) else f"{m}={v}"
+            for m, v in metric_results.items()))
 
-      if metric_results["miou"] > miou_best:
-        miou_best = metric_results["miou"]
-        for k in ("miou", "iou"):
-          wandb.run.summary[f"val/best_{k}"] = metric_results[k]
+    if metric_results["segmentation/miou"] > miou_best:
+      miou_best = metric_results["segmentation/miou"]
+      for k in ("miou", "iou"):
+        wandb.run.summary[f"val/segmentation/best_{k}"] = metric_results[f"segmentation/{k}"]
+    # endregion
 
-      save_model(model, model_path, parallel=GPUS_COUNT > 1)
+    save_model(model, model_path, parallel=GPUS_COUNT > 1)
 
-  print(TAG)
   wb_run.finish()
 
 
@@ -268,41 +282,51 @@ def train_step(
   model,
   images,
   targets,
+  masks,
   criterions,
   thresholds,
-  align_corners=None,
   ls=0.0,
   w_s=1.0,
   w_u=1.0,
   w_b=1.0,
+  bg_class: int = 0,
 ):
   criterion_c, criterion_s, criterion_b = criterions
   bg_t, fg_t = thresholds
 
   # Forward
   logits, features, saliencies, segms = model(
-    images.to(DEVICE), with_mask=True, with_saliency=True, resize_mask=False
+    images.to(DEVICE), with_mask=True, with_saliency=True, resize_mask=True
   )
 
   # (1) Classification loss.
   loss_c = criterion_c(logits, label_smoothing(targets, ls).to(DEVICE))
 
   # (2) Segmentation loss.
-  pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, align_corners)
-  pseudo_masks = resize_tensor(pseudo_masks, segms.shape[2:], "nearest", align_corners)
+  # pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners=True)
+  pseudo_masks = masks
+
+  if step == 0:
+    import matplotlib.pyplot as plt
+    source=datasets.custom_data_source("voc12", "/home/ldavid/workspace/datasets/VOCDevkit", "train")
+    fig1=np.concatenate([denormalize(i, *datasets.imagenet_stats()) for i in images.numpy()], 1)
+    fig2=np.concatenate(source.segmentation_info.colors[np.minimum(pseudo_masks, 21)], 1)
+    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig1); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_image.jpg");
+    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig2); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_label.jpg");
 
   pixels_u = pseudo_masks == 255
-  pixels_b = pseudo_masks == 0
-  pseudo_masks[pixels_b] = 255  # Ignore BG.
+  pixels_b = pseudo_masks == bg_class
+  pixels_fg = ~(pixels_u | pixels_b)
+  samples_fg = pixels_fg.sum((1, 2)) > 0
 
-  loss_s = criterion_s(segms, pseudo_masks.to(DEVICE))
+  loss_s = criterion_s(segms[samples_fg], pseudo_masks[samples_fg].to(DEVICE))
 
   # (3) Consistency loss.
   if not w_b:
     loss_b = torch.zeros(())
   else:
-    segm1 = torch.concat((saliencies, logits), dim=1)  # B(C+1)HW
-    segm1 = resize_tensor(segm1, segms.shape[2:], "bilinear", align_corners)
+    segm1 = torch.concat((saliencies, features), dim=1)  # B(C+1)HW
+    segm1 = resize_tensor(segm1, segms.shape[2:], "bilinear", align_corners=True)
     loss_b = criterion_b(segm1, segms)
 
   # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
@@ -311,8 +335,7 @@ def train_step(
   else:
     y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
     loss_u = torch.clamp(1 - torch.sigmoid(segms), min=0.0005, max=0.9995)
-    loss_u = -y_n * torch.log(loss_u)  # [A, B]
-    loss_u = loss_u.sum(dim=1) / y_n.sum(dim=1).clamp(min=1.0)
+    loss_u = (-y_n * torch.log(loss_u)).sum(dim=1)
     loss_u = loss_u[pixels_u].mean()
 
   loss = loss_c + w_s * loss_s  + w_u * loss_u + w_b * loss_b
@@ -327,45 +350,75 @@ def train_step(
 
   return loss, metrics
 
+
 def valid_step(
     model: torch.nn.Module,
     loader: DataLoader,
-    info: datasets.DatasetInfo,
+    data_source: datasets.CustomDataSource,
+    thresholds: List[float],
     device: str,
     log_samples: bool = True,
     max_steps: Optional[int] = None,
 ):
-  classes = [c for i, c in enumerate(info.classes) if i != info.void_class]
+  # if dataset does not have a background class, add it at i=0.
+  info_cls = data_source.classification_info
+  info_seg = data_source.segmentation_info
+
+  include_bg = info_cls.bg_class is None
+  bg_class = info_cls.bg_class or 0
+  classes = [c for i, c in enumerate(info_cls.classes) if i != info_cls.void_class]
+  meters_cam = {t: MIoUCalculator(info_cls.classes, bg_class=bg_class, include_bg=include_bg) for t in thresholds}
+  meters_seg = MIoUCalculator(classes, bg_class=info_seg.bg_class, include_bg=False)
 
   start = time.time()
-  meter = MIoUCalculator(classes, bg_class=info.bg_class, include_bg=False)
+
+  preds_ = []
+  targets_ = []
 
   with torch.no_grad():
     for step, (ids, inputs, targets, masks) in enumerate(loader):
-      _, H, W = masks.shape
-
-      _, pred_masks = model(inputs.to(device), with_mask=True)
-      preds = torch.argmax(pred_masks, dim=1).cpu()
-
-      masks = resize_tensor(masks, preds.shape[2:], mode="nearest")
-      preds = to_numpy(preds)
+      targets = to_numpy(targets)
       masks = to_numpy(masks)
 
-      meter.add_many(preds, masks)
+      logits, features, pred_masks = model(inputs.to(device), with_cam=True, with_mask=True)
+
+      preds = to_numpy(torch.sigmoid(logits.cpu().float()))
+      cams = to_numpy(make_cam(features.cpu().float())) * targets[..., np.newaxis, np.newaxis]
+      cams = cams.transpose(0, 2, 3, 1)
+
+      pred_masks = torch.argmax(pred_masks, dim=1).cpu()
+      pred_masks = to_numpy(pred_masks)
+
+      preds_.append(preds)
+      targets_.append(targets)
+
+      meters_seg.add_many(pred_masks, masks)
+      accumulate_batch_iou_priors(masks, cams, meters_cam, include_bg=include_bg)
 
       if step == 0 and log_samples:
         inputs = to_numpy(inputs)
-        wandb_utils.log_masks(ids, inputs, targets, masks, preds, info.classes, void_class=info.void_class)
+        wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes)
+        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, void_class=info_seg.void_class)
 
       if max_steps and step >= max_steps:
         break
 
-  miou, miou_fg, iou, FP, FN = meter.get(clear=True, detail=True)
-  iou = [round(iou[c], 2) for c in classes]
-
   elapsed = time.time() - start
 
-  return {
+  miou, miou_fg, iou, FP, FN = meters_seg.get(clear=True, detail=True)
+  iou = [round(iou[c], 2) for c in classes]
+
+  preds_ = np.concatenate(preds_, axis=0)
+  targets_ = np.concatenate(targets_, axis=0)
+
+  try:
+    precision, recall, f_score, _ = skmetrics.precision_recall_fscore_support(targets_, preds_.round(), average="macro")
+    roc = skmetrics.roc_auc_score(targets_, preds_, average="macro")
+  except ValueError:
+    precision = recall = f_score = roc = 0.
+
+  results_cam = maximum_miou_from_thresholds(meters_cam)
+  results_seg = {
     "miou": miou,
     "miou_fg": miou_fg,
     "iou": iou,
@@ -373,6 +426,18 @@ def valid_step(
     "fn": FN,
     "time": elapsed,
   }
+  results_clf = {
+    "precision": round(100 * precision, 3),
+    "recall": round(100 * recall, 3),
+    "f_score": round(100 * f_score, 3),
+    "roc_auc": round(100 * roc, 3),
+  }
+
+  results = {}
+  results.update({f"priors/{k}": v for k, v in results_cam.items()})
+  results.update({f"segmentation/{k}": v for k, v in results_seg.items()})
+  results.update({f"classification/{k}": v for k, v in results_clf.items()})
+  return results
 
 
 def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None):
@@ -392,13 +457,14 @@ def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_co
 
   return torch.as_tensor(np.asarray(masks, dtype="int64"))
 
+
 def _get_pseudo_label(args):
   image, cam, target, bg_t, fg_t = args
   image = denormalize(image, *datasets.imagenet_stats())
 
   labels = target > 0.5
   cam = cam[labels]
-  keys = np.concatenate(([0], np.where(labels)[0]))
+  keys = np.concatenate(([0], np.where(labels)[0]+1))
 
   fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
   fg_cam = np.argmax(fg_cam, axis=0)
@@ -413,7 +479,6 @@ def _get_pseudo_label(args):
   mask[bg_conf + fg_conf == 0] = 0
 
   return mask
-
 
 
 if __name__ == '__main__':

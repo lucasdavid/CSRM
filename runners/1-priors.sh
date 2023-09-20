@@ -2,9 +2,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=48
 #SBATCH -p sequana_gpu_shared
-#SBATCH -J ss-train
-#SBATCH -o /scratch/lerdl/lucas.david/logs/%j-ss.out
-#SBATCH --time=32:00:00
+#SBATCH -J priors
+#SBATCH -o /scratch/lerdl/lucas.david/logs/%j-priors.out
+#SBATCH --time=24:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -26,16 +26,16 @@
 
 if [[ "`hostname`" == "sdumont"* ]]; then
   ENV=sdumont
-  WORK_DIR=$SCRATCH/single-stage
+  WORK_DIR=$SCRATCH/pnoc
 else
   ENV=local
   WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
 fi
 
 # Dataset
-DATASET=voc12  # Pascal VOC 2012
+# DATASET=voc12  # Pascal VOC 2012
 # DATASET=coco14  # MS COCO 2014
-# DATASET=deepglobe # DeepGlobe Land Cover Classification
+DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
 . $WORK_DIR/runners/config/dataset.sh
@@ -50,26 +50,30 @@ ARCHITECTURE=resnest269
 TRAINABLE_STEM=true
 TRAINABLE_BONE=true
 DILATED=false
-USE_SALIENCY_HEAD=true
 MODE=normal
 REGULAR=none
 
-LR=0.007  # voc12
-# LR=0.004  # coco14
-# LR=0.001  # deepglobe
-
 # Training
+# LR=0.1  # defined in dataset.sh
 OPTIMIZER=sgd  # sgd,lion
-EPOCHS=50
+EPOCHS=15
 BATCH_SIZE=32
 ACCUMULATE_STEPS=1
 
 LR_ALPHA_SCRATCH=10.0
-LR_ALPHA_BIAS=1.0
+LR_ALPHA_BIAS=2.0
+
+# =========================
+# $PIP install lion-pytorch
+# OPTIMIZER=lion
+# LR_ALPHA_SCRATCH=1.0
+# LR_ALPHA_BIAS=1.0
+# LR=0.00001
+# WD=0.01
+# =========================
 
 MIXED_PRECISION=true
 PERFORM_VALIDATION=true
-PROGRESS=true
 
 ## Augmentation
 AUGMENT=randaugment  # collorjitter_mixup_cutmix_cutormixup
@@ -110,66 +114,16 @@ CRF_T=0
 CRF_GT=0.7
 
 
-train_poc() {
+train_vanilla() {
   echo "=================================================================="
-  echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
+  echo "[train $TAG_VANILLA] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,poc" \
-    WANDB_RUN_GROUP="$DATASET-$ARCH-poc" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,aug:ra" \
+    WANDB_RUN_GROUP="$DATASET-$ARCH-vanilla" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/cam/train_poc.py \
-    --tag $TAG \
-    --lr $LR \
-    --num_workers $WORKERS_TRAIN \
-    --batch_size $BATCH_SIZE \
-    --accumulate_steps $ACCUMULATE_STEPS \
-    --mixed_precision $MIXED_PRECISION \
-    --architecture $ARCHITECTURE \
-    --dilated $DILATED \
-    --mode $MODE \
-    --trainable-stem $TRAINABLE_STEM \
-    --regularization $REGULAR \
-    --oc-architecture $OC_ARCHITECTURE \
-    --oc-pretrained $OC_PRETRAINED \
-    --oc-regularization $OC_REGULAR \
-    --oc-mask-globalnorm $OC_MASK_GN \
-    --image_size $IMAGE_SIZE \
-    --min_image_size $MIN_IMAGE_SIZE \
-    --max_image_size $MAX_IMAGE_SIZE \
-    --augment $AUGMENT \
-    --cutmix_prob $CUTMIX \
-    --mixup_prob $MIXUP \
-    --label_smoothing $LABELSMOOTHING \
-    --max_epoch $EPOCHS \
-    --alpha $P_ALPHA \
-    --alpha_init $P_INIT \
-    --alpha_schedule $P_SCHEDULE \
-    --oc-alpha $OC_ALPHA \
-    --oc-alpha-init $OC_INIT \
-    --oc-alpha-schedule $OC_SCHEDULE \
-    --oc-strategy $OC_STRATEGY \
-    --oc-focal-momentum $OC_F_MOMENTUM \
-    --oc-focal-gamma $OC_F_GAMMA \
-    --validate $PERFORM_VALIDATION \
-    --validate_max_steps $VALIDATE_MAX_STEPS \
-    --validate_thresholds $VALIDATE_THRESHOLDS \
-    --dataset $DATASET \
-    --domain_train $DOMAIN_TRAIN \
-    --domain_valid $DOMAIN_VALID \
-    --data_dir $DATA_DIR;
-}
-
-train_singlestage() {
-  echo "=================================================================="
-  echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
-  echo "=================================================================="
-
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ss" \
-    WANDB_RUN_GROUP="$DATASET-$ARCH-ss" \
-    CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/train_singlestage.py \
-    --tag $TAG \
+    $PY scripts/cam/train_vanilla.py \
+    --tag $TAG_VANILLA \
     --lr $LR \
     --wd $WD \
     --optimizer $OPTIMIZER \
@@ -179,7 +133,6 @@ train_singlestage() {
     --accumulate_steps $ACCUMULATE_STEPS \
     --mixed_precision $MIXED_PRECISION \
     --architecture $ARCHITECTURE \
-    --use_saliency_head $USE_SALIENCY_HEAD \
     --dilated $DILATED \
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
@@ -196,14 +149,12 @@ train_singlestage() {
     --dataset $DATASET \
     --data_dir $DATA_DIR \
     --domain_train $DOMAIN_TRAIN \
-    --domain_valid $DOMAIN_VALID_SEG \
-    --progress $PROGRESS \
+    --domain_valid $DOMAIN_VALID \
     --validate $PERFORM_VALIDATION \
     --validate_max_steps $VALIDATE_MAX_STEPS \
     --validate_thresholds $VALIDATE_THRESHOLDS \
     --device $DEVICE \
-    --restore $RESTORE \
-    --num_workers $WORKERS_TRAIN;
+    --num_workers $WORKERS_TRAIN
 }
 
 inference_priors() {
@@ -241,33 +192,39 @@ evaluate_priors() {
     --num_workers $WORKERS_INFER;
 }
 
-LR=0.01  # voc12
-MODE=fix
-TRAINABLE_STEM=false
-TRAINABLE_BONE=false
-ARCHITECTURE=resnest101
-ARCH=rs101
-DILATED=true
+ARCHITECTURE=resnet101
+ARCH=rn101
 OC_ARCHITECTURE=$ARCHITECTURE
 
-BATCH_SIZE=16
-ACCUMULATE_STEPS=1
+TRAINABLE_BONE=false
+TRAINABLE_STEM=false
+MODE=fix
+LR=0.01
+
+AUGMENT=randaugment
 LABELSMOOTHING=0
-AUGMENT=colorjitter  # none for DeepGlobe
 
 EID=r1  # Experiment ID
 
-# RESTORE=experiments/models/vanilla/voc12-rn50-ra-ls.pth
-# RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
-# RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
-RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rs50fe-rals-ce-lr0.01-cwnone-r1.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
+TAG_VANILLA=vanilla/$DATASET-${ARCH}fe-lr$LR-ra-$EID
+train_vanilla
 
-USE_SALIENCY_HEAD=false
-TAG=ss/$DATASET-$ARCH-lr$LR-ra-seggt_wb0_wu0-$EID
-train_singlestage
+# BATCH_SIZE=16
+# ACCUMULATE_STEPS=2
+# LABELSMOOTHING=0.1
+# AUGMENT=colorjitter  # none for DeepGlobe
+
+# OC_NAME="$ARCH"-rals
+# OC_PRETRAINED=experiments/models/$TAG_VANILLA.pth
+
+# # TAG="puzzle/$DATASET-$ARCH-p-b$BATCH_SIZE-lr$LR-ls-$EID"
+# # train_puzzle
+
+# # TAG="poc/$DATASET-$ARCH-poc-b$BATCH_SIZE-lr$LR-ls@$OC_NAME-$EID"
+# # train_poc
+
+# TAG="pnoc/$DATASET-$ARCH-pnoc-b$BATCH_SIZE-lr$LR-ls@$OC_NAME-$EID"
+# train_pnoc
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors
 # DOMAIN=$DOMAIN_VALID inference_priors
