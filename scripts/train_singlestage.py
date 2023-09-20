@@ -279,7 +279,7 @@ def train_singlestage(args, wb_run, model_path):
 
 def train_step(
   step,
-  model,
+  model: SingleStageModel,
   images,
   targets,
   masks,
@@ -290,17 +290,19 @@ def train_step(
   w_u=1.0,
   w_b=1.0,
   bg_class: int = 0,
+  b_modes = (),
+  t_b=1.0,
+  sigma_b=0.5,
 ):
   criterion_c, criterion_s, criterion_b = criterions
   bg_t, fg_t = thresholds
 
   # Forward
-  logits, features, saliencies, segms = model(
-    images.to(DEVICE), with_mask=True, with_saliency=True, resize_mask=True
-  )
+  outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True)
+  # logits_c, features_c, masks_sal, masks_seg
 
   # (1) Classification loss.
-  loss_c = criterion_c(logits, label_smoothing(targets, ls).to(DEVICE))
+  loss_c = criterion_c(outputs["logits_c"], label_smoothing(targets, ls).to(DEVICE))
 
   # (2) Segmentation loss.
   # pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners=True)
@@ -312,22 +314,39 @@ def train_step(
     fig1=np.concatenate([denormalize(i, *datasets.imagenet_stats()) for i in images.numpy()], 1)
     fig2=np.concatenate(source.segmentation_info.colors[np.minimum(pseudo_masks, 21)], 1)
     plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig1); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_image.jpg");
-    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig2); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_label.jpg");
+    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig2); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_pseudo_mask.jpg");
 
   pixels_u = pseudo_masks == 255
   pixels_b = pseudo_masks == bg_class
   pixels_fg = ~(pixels_u | pixels_b)
   samples_fg = pixels_fg.sum((1, 2)) > 0
 
-  loss_s = criterion_s(segms[samples_fg], pseudo_masks[samples_fg].to(DEVICE))
+  loss_s = criterion_s(outputs["masks_seg"][samples_fg], pseudo_masks[samples_fg].to(DEVICE))
 
   # (3) Consistency loss.
+  loss_b = torch.zeros(())
+  pprobs_sal = outputs["masks_seg"].detach()
+  pprobs_sal = torch.softmax(pprobs_sal / t_b, dim=1)
   if not w_b:
-    loss_b = torch.zeros(())
-  else:
-    segm1 = torch.concat((saliencies, features), dim=1)  # B(C+1)HW
-    segm1 = resize_tensor(segm1, segms.shape[2:], "bilinear", align_corners=True)
-    loss_b = criterion_b(segm1, segms)
+    ...
+  if 1 in b_modes:
+    loss_b += criterion_b(outputs["masks_sal"], pprobs_sal[:, bg_class].unsqueeze(1))
+  if 2 in b_modes:
+    # Branches Mutual Promotion
+    # https://arxiv.org/pdf/2308.04949.pdf
+
+    pmasks_sal = pprobs_sal.argmax(dim=1)
+    p_conf_sal = pprobs_sal.max(1, keepdim=True)[0] > sigma_b
+    pmasks_sal[~p_conf_sal] = 255
+
+    if model.use_saliency_head:
+      masks_bg = outputs["masks_sal"]
+    else:
+      masks_bg = outputs["masks_seg"][:, bg_class].unsqueeze(1).detach()
+
+    masks_c = torch.concat((masks_bg, outputs["features_c"]), dim=1)  # B(C+1)HW
+    masks_c = resize_tensor(masks_c, pmasks_sal.shape[2:], "bilinear", align_corners=True)
+    loss_b = criterion_b(masks_c, pmasks_sal)
 
   # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
   if not w_u or pixels_u.sum() == 0:
@@ -360,15 +379,11 @@ def valid_step(
     log_samples: bool = True,
     max_steps: Optional[int] = None,
 ):
-  # if dataset does not have a background class, add it at i=0.
   info_cls = data_source.classification_info
   info_seg = data_source.segmentation_info
 
-  include_bg = info_cls.bg_class is None
-  bg_class = info_cls.bg_class or 0
-  classes = [c for i, c in enumerate(info_cls.classes) if i != info_cls.void_class]
-  meters_cam = {t: MIoUCalculator(info_cls.classes, bg_class=bg_class, include_bg=include_bg) for t in thresholds}
-  meters_seg = MIoUCalculator(classes, bg_class=info_seg.bg_class, include_bg=False)
+  meters_cam = {t: MIoUCalculator.from_dataset_info(info_cls) for t in thresholds}
+  meters_seg = MIoUCalculator(info_cls.classes, bg_class=info_seg.bg_class, include_bg=False)
 
   start = time.time()
 
@@ -393,12 +408,12 @@ def valid_step(
       targets_.append(targets)
 
       meters_seg.add_many(pred_masks, masks)
-      accumulate_batch_iou_priors(masks, cams, meters_cam, include_bg=include_bg)
+      accumulate_batch_iou_priors(masks, cams, meters_cam, include_bg=info_cls.bg_class is None)
 
       if step == 0 and log_samples:
         inputs = to_numpy(inputs)
         wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes)
-        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, void_class=info_seg.void_class)
+        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, info_seg.void_class)
 
       if max_steps and step >= max_steps:
         break
@@ -406,7 +421,7 @@ def valid_step(
   elapsed = time.time() - start
 
   miou, miou_fg, iou, FP, FN = meters_seg.get(clear=True, detail=True)
-  iou = [round(iou[c], 2) for c in classes]
+  iou = [round(iou[c], 2) for c in info_cls.classes]
 
   preds_ = np.concatenate(preds_, axis=0)
   targets_ = np.concatenate(targets_, axis=0)
