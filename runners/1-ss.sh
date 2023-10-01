@@ -116,7 +116,7 @@ train_ss() {
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,m:$S2C_MODE" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,m:$S2C_MODE,l:$C2S_PSEUDO_LABEL_MODE" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-ss" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
     $PY scripts/train_ss.py \
@@ -124,6 +124,8 @@ train_ss() {
     --lr $LR \
     --wd $WD \
     --s2c_mode $S2C_MODE \
+    --c2s_pseudo_label_mode $C2S_PSEUDO_LABEL_MODE \
+    --c2s_sigma $C2S_SIGMA \
     --s2c_sigma $S2C_SIGMA \
     --optimizer $OPTIMIZER \
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
@@ -213,7 +215,9 @@ LABELSMOOTHING=0
 AUGMENT=colorjitter  # none for DeepGlobe
 
 S2C_MODE=bce
+C2S_PSEUDO_LABEL_MODE=cam
 S2C_SIGMA=1.0
+C2S_SIGMA=0.5
 
 EID=r1  # Experiment ID
 
@@ -284,9 +288,14 @@ S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SI
 USE_SAL_HEAD=false
 LR_POLY_POWER=0.9
 DILATED=true
-TAG=ss/$DATASET-${ARCH}d-lr${LR}c-wu0-$S2C_MODE-$EID
-train_ss
+TAG=ss/$DATASET-${ARCH}d-lr${LR}-wu0-$S2C_MODE-$EID
+# train_ss
 
+C2S_PSEUDO_LABEL_MODE=mp
+S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+C2S_SIGMA=0.75  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+TAG=ss/$DATASET-${ARCH}d-lr${LR}-lm_$C2S_PSEUDO_LABEL_MODE-wu0-$S2C_MODE-$EID
+train_ss
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors
 # DOMAIN=$DOMAIN_VALID inference_priors

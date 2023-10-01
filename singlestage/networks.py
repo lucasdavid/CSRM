@@ -1,8 +1,4 @@
-import numpy as np
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.model_zoo as model_zoo
 
 from core.networks import *
 from tools.ai.torch_utils import gap2d, resize_tensor

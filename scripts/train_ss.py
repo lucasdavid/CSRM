@@ -4,6 +4,7 @@ from multiprocessing import Pool
 from typing import List
 
 import numpy as np
+import scipy.special
 import sklearn.metrics as skmetrics
 import torch
 from torch.utils.data import DataLoader
@@ -20,9 +21,9 @@ from tools.ai.log_utils import *
 from tools.ai.optim_utils import *
 from tools.ai.randaugment import *
 from tools.ai.torch_utils import *
+from tools.general import wandb_utils
 from tools.general.io_utils import *
 from tools.general.time_utils import *
-from tools.general import wandb_utils
 
 parser = argparse.ArgumentParser()
 
@@ -81,7 +82,8 @@ parser.add_argument('--mixup_prob', default=1.0, type=float)
 
 # Single-Stage
 parser.add_argument('--s2c_mode', default="bce", choices=["bce", "kld", "mp"])
-parser.add_argument('--s2c_sigma', default=1.0, type=float)
+parser.add_argument('--s2c_sigma', default=0.5, type=float)
+parser.add_argument('--c2s_sigma', default=0.5, type=float)
 parser.add_argument('--c2s_pseudo_label_mode', default='cam', type=str, choices=["cam", "mp"])
 
 
@@ -225,6 +227,7 @@ def train_singlestage(args, wb_run, model_path):
             w_u=w_u,
             s2c_mode=args.s2c_mode,
             s2c_sigma=s2c_sigma,
+            c2s_sigma=args.c2s_sigma,
             bg_class=ts.segmentation_info.bg_class,
           )
 
@@ -314,6 +317,7 @@ def train_step(
   w_s2c,
   w_u,
   s2c_sigma: float,
+  c2s_sigma: float,
   s2c_mode: str,
   bg_class: int,
 ):
@@ -336,6 +340,7 @@ def train_step(
     thresholds,
     resize_align_corners=True,
     mode=args.c2s_pseudo_label_mode,
+    c2s_sigma=c2s_sigma,
   )
 
   pixels_u = pseudo_masks == 255
@@ -508,7 +513,7 @@ def valid_step(
   return results
 
 
-def get_pseudo_label(images, cams, masks_bg, targets, thresholds, resize_align_corners=None, mode="cam"):
+def get_pseudo_label(images, cams, masks_bg, targets, thresholds, resize_align_corners=None, mode="cam", c2s_sigma=0.5):
   sizes = images.shape[2:]
 
   cams = cams.cpu().to(torch.float32) * to_2d(targets)
@@ -527,7 +532,7 @@ def get_pseudo_label(images, cams, masks_bg, targets, thresholds, resize_align_c
       _args = [(i, c, t, thresholds) for i, c, t in zip(images, cams, targets)]
     else:
       _fn = _get_pseudo_label_from_mutual_promotion
-      _args = [(i, c, t, m) for i, c, t, m in zip(images, cams, targets, masks_bg)]
+      _args = [(i, c, t, m, c2s_sigma) for i, c, t, m in zip(images, cams, targets, masks_bg)]
 
     masks_bg = pool.map(_fn, _args)
 
@@ -558,7 +563,7 @@ def _get_pseudo_label_from_cams(args):
 
 
 def _get_pseudo_label_from_mutual_promotion(args):
-  image, cam, target, bg_mask = args
+  image, cam, target, bg_mask, c2s_sigma = args
   image = denormalize(image, *datasets.imagenet_stats())
 
   labels = target > 0.5
@@ -566,8 +571,12 @@ def _get_pseudo_label_from_mutual_promotion(args):
   keys = np.concatenate(([0], np.where(labels)[0] + 1))
 
   logit = np.concatenate((bg_mask[np.newaxis, ...], cam))
+  probs = scipy.special.softmax(logit)
   mask = np.argmax(logit, axis=0)
   mask = keys[crf_inference_label(image, mask, n_labels=keys.shape[0])]
+
+  uncertain_pixels = probs < c2s_sigma
+  mask[uncertain_pixels] = 255
 
   return mask
 
