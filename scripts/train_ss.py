@@ -27,7 +27,7 @@ from tools.general import wandb_utils
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--tag', type=str, required=True)
-parser.add_argument('--print_ratio', default=0.25, type=float)
+parser.add_argument('--print_ratio', default=0.1, type=float)
 parser.add_argument('--progress', default=True, type=str2bool)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--seed', default=0, type=int)
@@ -45,7 +45,7 @@ parser.add_argument('--mode', default='normal', type=str, choices=["normal", "fi
 parser.add_argument('--regularization', default=None, type=str)  # kernel_usage
 parser.add_argument('--trainable-stem', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
-parser.add_argument('--use_saliency_head', default=False, type=str2bool)
+parser.add_argument('--use_sal_head', default=False, type=str2bool)
 parser.add_argument('--dilated', default=True, type=str2bool)
 parser.add_argument('--use_gn', default=True, type=str2bool)
 parser.add_argument('--restore', default=None, type=str)
@@ -64,9 +64,10 @@ parser.add_argument('--validate_thresholds', default=None, type=str)
 parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--wd', default=1e-4, type=float)
 parser.add_argument('--label_smoothing', default=0, type=float)
-parser.add_argument('--optimizer', default="sgd", choices=["sgd", "lion"])
+parser.add_argument('--optimizer', default="sgd", choices=["sgd", "adamw", "lion"])
 parser.add_argument('--momentum', default=.9, type=float)
 parser.add_argument('--nesterov', default=True, type=str2bool)
+parser.add_argument('--lr_poly_power', default=2., type=float)
 parser.add_argument('--lr_alpha_scratch', default=10., type=float)
 parser.add_argument('--lr_alpha_bias', default=2., type=float)
 
@@ -79,7 +80,9 @@ parser.add_argument('--cutmix_prob', default=1.0, type=float)
 parser.add_argument('--mixup_prob', default=1.0, type=float)
 
 # Single-Stage
-parser.add_argument('--loss_b', default='l1', choices=["l1", "kld"])
+parser.add_argument('--s2c_mode', default="bce", choices=["bce", "kld", "mp"])
+parser.add_argument('--s2c_sigma', default=1.0, type=float)
+parser.add_argument('--c2s_pseudo_label_mode', default='cam', type=str, choices=["cam", "mp"])
 
 
 import cv2
@@ -120,7 +123,9 @@ def train_singlestage(args, wb_run, model_path):
   criterions = (
     torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
     torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
-    torch.nn.L1Loss() if args.loss_b == "l1" else torch.nn.KLDivLoss(log_target=True, reduction="batchmean"),
+    torch.nn.BCEWithLogitsLoss(reduction="none").to(DEVICE) if args.s2c_mode == "bce"
+      else torch.nn.KLDivLoss(reduction="batchmean").to(DEVICE) if args.s2c_mode == "kld"
+      else None,  # if args.s2c_mode == "mp"
   )
 
   # Network
@@ -133,10 +138,7 @@ def train_singlestage(args, wb_run, model_path):
     use_group_norm=args.use_gn,
     trainable_stem=args.trainable_stem,
     trainable_backbone=args.trainable_backbone,
-    use_saliency_head=args.use_saliency_head,
-    criterion_c=criterions[0],
-    criterion_s=criterions[1],
-    criterion_b=criterions[2],
+    use_sal_head=args.use_sal_head,
   )
 
   if args.restore:
@@ -146,7 +148,6 @@ def train_singlestage(args, wb_run, model_path):
       if m not in state_dict:
         print("    Skip init:", m)
     model.load_state_dict(state_dict, strict=False)
-    model.from_scratch_layers.remove(model.classifier)
   log_model("SingleStage", model, args)
 
   param_groups = model.get_parameter_groups()
@@ -168,111 +169,133 @@ def train_singlestage(args, wb_run, model_path):
     param_groups=param_groups,
     algorithm=args.optimizer,
     alpha_scratch=args.lr_alpha_scratch,
-    alpha_bias=args.lr_alpha_bias
+    alpha_bias=args.lr_alpha_bias,
+    poly_power=args.lr_poly_power,
   )
   scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
   log_opt_params("SingleStage", param_groups)
   print("", flush=True)
 
   # Train
-  train_meter = MetricsContainer("loss loss_c loss_s loss_b loss_u".split())
+  train_meter = MetricsContainer("loss loss_c loss_c2s loss_s2c loss_u conf_pixels_s2c conf_pixels_c2s".split())
   train_timer = Timer()
   miou_best = -1
 
-  for epoch in range(args.first_epoch, args.max_epoch):
-    for step, batch in enumerate(tqdm(train_loader, mininterval=2.0, disable=not args.progress, ncols=10)):
-      _, images, targets, true_masks = batch
+  try:
+    for epoch in range(args.first_epoch, args.max_epoch):
+      for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}", mininterval=2.0, disable=not args.progress, ncols=60)):
+        _, images, targets, true_masks = batch
 
-      # fg_t = linear_schedule(step, step_max, 0.5, 0.3, 1.0, constraint=max)
-      # bg_t = linear_schedule(step, step_max, 0.001, 0.3, 1.0)
-      fg_t = 0.40
-      bg_t = 0.05
-      # w_s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
-      w_s = 1
-      # w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
-      # w_b = linear_schedule(optimizer.global_step, optimizer.max_step, 0.0, 1.0, 0.5)
-      w_u = w_b = 0
-      # w_s = w_u = w_b = 0.0
+        # fg_t = linear_schedule(step, step_max, 0.5,  0.2, 1.0, constraint=max)
+        # bg_t = linear_schedule(step, step_max, 0.01, 0.2, 1.0)
+        fg_t = 0.30
+        bg_t = 0.05
 
+        w_c = 1.0
+        # w_c2s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+        w_c2s = 1.0
+        # w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
+        w_u = 0
+        w_s2c = linear_schedule(optimizer.global_step, optimizer.max_step, 0.1, 1.0, 1.0)
+
+        s2c_sigma = args.s2c_sigma
+
+        if args.s2c_mode == "bce":
+          # print("s2c_mode is BCE => setting s2c_sigma=lerp(0.9, 0.5, 1, max).")
+          s2c_sigma = linear_schedule(optimizer.global_step, optimizer.max_step, args.s2c_sigma, 0.5, 1.0, constraint=max)
+
+        if args.s2c_mode == "kld":
+          # print(f"s2c_mode is KLD => setting w_c=.9, w_s2c=.1 (user T={s2c_sigma})")
+          w_c = 0.9
+          w_s2c = 0.1
+
+        with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
+          loss, metrics = train_step(
+            step,
+            model,
+            images,
+            targets,
+            true_masks,
+            criterions,
+            thresholds=(bg_t, fg_t),
+            ls=args.label_smoothing,
+            w_c=w_c,
+            w_c2s=w_c2s,
+            w_s2c=w_s2c,
+            w_u=w_u,
+            s2c_mode=args.s2c_mode,
+            s2c_sigma=s2c_sigma,
+            bg_class=ts.segmentation_info.bg_class,
+          )
+
+        scaler.scale(loss / args.accumulate_steps).backward()
+
+        if (step + 1) % args.accumulate_steps == 0:
+          scaler.step(optimizer)
+          scaler.update()
+          optimizer.zero_grad()
+
+        train_meter.update({m: v.item() for m, v in metrics.items()})
+
+        do_logging = (step + 1) % step_log == 0
+        do_validation = args.validate and (step + 1) == step_val
+
+        if do_logging:
+          lr = float(get_learning_rate_from_optimizer(optimizer))
+
+          loss, loss_c, loss_c2s, loss_s2c, loss_u, conf_pixels_s2c, conf_pixels_c2s = train_meter.get(clear=True)
+          data = {
+            'step': step + 1,
+            "epoch": epoch + 1,
+            'lr': lr,
+            'time': train_timer.tok(clear=True),
+            "fg_t": fg_t,
+            "bg_t": bg_t,
+            "loss": loss,
+            "loss_c": loss_c,
+            "loss_c2s": loss_c2s,
+            "loss_s2c": loss_s2c,
+            "loss_u": loss_u,
+            "w_c2s": w_c2s,
+            "w_s2c": w_s2c,
+            "w_u": w_u,
+            "s2c_sigma": s2c_sigma,
+            "conf_pixels_s2c": conf_pixels_s2c,
+            "conf_pixels_c2s": conf_pixels_c2s,
+          }
+          wandb.log({f"train/{k}": v for k, v in data.items()}, commit=not do_validation)
+          print(f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} loss_u={loss_u:.3f} lr={lr:.3f}")
+
+      # region Evaluation
+      model.eval()
       with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-        loss, metrics = train_step(
-          step,
+        metric_results = valid_step(
           model,
-          images,
-          targets,
-          true_masks,
-          criterions,
-          thresholds=(bg_t, fg_t),
-          ls=args.label_smoothing,
-          w_s=w_s,
-          w_u=w_u,
-          w_b=w_b,
-          bg_class=ts.segmentation_info.bg_class,
+          valid_loader,
+          ts,
+          THRESHOLDS,
+          DEVICE,
+          log_samples=True,
+          max_steps=args.validate_max_steps,
         )
+        metric_results.update({"iteration": step+1, "epoch": epoch+1})
+      model.train()
 
-      scaler.scale(loss / args.accumulate_steps).backward()
+      wandb.log({f"val/{k}": v for k, v in metric_results.items()})
+      print(f"[Epoch {epoch}/{args.max_epoch}]",
+            *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
+              for m, v in metric_results.items()))
 
-      if (step + 1) % args.accumulate_steps == 0:
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
+      if metric_results["segmentation/miou"] > miou_best:
+        miou_best = metric_results["segmentation/miou"]
+        for k in ("miou", "iou"):
+          wandb.run.summary[f"val/segmentation/best_{k}"] = metric_results[f"segmentation/{k}"]
+      # endregion
 
-      train_meter.update({m: v.item() for m, v in metrics.items()})
+      save_model(model, model_path, parallel=GPUS_COUNT > 1)
 
-      do_logging = (step + 1) % step_log == 0
-      do_validation = args.validate and (step + 1) == step_val
-
-      if do_logging:
-        lr = float(get_learning_rate_from_optimizer(optimizer))
-
-        loss, loss_c, loss_s, loss_b, loss_u = train_meter.get(clear=True)
-        data = {
-          'step': step + 1,
-          "epoch": epoch + 1,
-          'lr': lr,
-          'time': train_timer.tok(clear=True),
-          "fg_t": fg_t,
-          "bg_t": bg_t,
-          "loss": loss,
-          "loss_c": loss_c,
-          "loss_s": loss_s,
-          "loss_b": loss_b,
-          "loss_u": loss_u,
-          "w_s": w_s,
-          "w_u": w_u,
-          "w_b": w_b,
-        }
-
-        wb_logs = {f"train/{k}": v for k, v in data.items()}
-        wandb.log(wb_logs, commit=not do_validation)
-        print(f" loss={loss:.5f} loss_c={loss_c:.5f} loss_s={loss_s:.5f} loss_b={loss_b:.5f} loss_u={loss_u:.5f}")
-
-    # region Evaluation
-    model.eval()
-    with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-      metric_results = valid_step(
-        model,
-        valid_loader,
-        ts,
-        THRESHOLDS,
-        DEVICE,
-        log_samples=True,
-      )
-      metric_results.update({"iteration": step+1, "epoch": epoch+1})
-    model.train()
-
-    wandb.log({f"val/{k}": v for k, v in metric_results.items()})
-    print(f"[Epoch {epoch}/{args.max_epoch}]",
-          *(f"{m}={v:.5f}" if isinstance(v, float) else f"{m}={v}"
-            for m, v in metric_results.items()))
-
-    if metric_results["segmentation/miou"] > miou_best:
-      miou_best = metric_results["segmentation/miou"]
-      for k in ("miou", "iou"):
-        wandb.run.summary[f"val/segmentation/best_{k}"] = metric_results[f"segmentation/{k}"]
-    # endregion
-
-    save_model(model, model_path, parallel=GPUS_COUNT > 1)
+  except KeyboardInterrupt:
+    print("training halted")
 
   wb_run.finish()
 
@@ -285,86 +308,115 @@ def train_step(
   masks,
   criterions,
   thresholds,
-  ls=0.0,
-  w_s=1.0,
-  w_u=1.0,
-  w_b=1.0,
-  bg_class: int = 0,
-  b_modes = (),
-  t_b=1.0,
-  sigma_b=0.5,
+  ls,
+  w_c,
+  w_c2s,
+  w_s2c,
+  w_u,
+  s2c_sigma: float,
+  s2c_mode: str,
+  bg_class: int,
 ):
-  criterion_c, criterion_s, criterion_b = criterions
-  bg_t, fg_t = thresholds
+  criterion_c, criterion_c2s, criterion_s2c = criterions
 
   # Forward
   outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True)
-  # logits_c, features_c, masks_sal, masks_seg
 
   # (1) Classification loss.
   loss_c = criterion_c(outputs["logits_c"], label_smoothing(targets, ls).to(DEVICE))
+  logit_seg = outputs["masks_seg"].detach()
 
   # (2) Segmentation loss.
-  # pseudo_masks = get_pseudo_label(images, features, targets, bg_t, fg_t, resize_align_corners=True)
-  pseudo_masks = masks
-
-  if step == 0:
-    import matplotlib.pyplot as plt
-    source=datasets.custom_data_source("voc12", "/home/ldavid/workspace/datasets/VOCDevkit", "train")
-    fig1=np.concatenate([denormalize(i, *datasets.imagenet_stats()) for i in images.numpy()], 1)
-    fig2=np.concatenate(source.segmentation_info.colors[np.minimum(pseudo_masks, 21)], 1)
-    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig1); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_image.jpg");
-    plt.figure(figsize=(len(pseudo_masks) * 3, 3)); plt.imshow(fig2); plt.axis("off"); plt.tight_layout(); plt.savefig(f"experiments/visual-results/ss_step_{step}_pseudo_mask.jpg");
+  # pseudo_masks = masks
+  pseudo_masks = get_pseudo_label(
+    images,
+    outputs["features_c"],
+    logit_seg[..., bg_class],
+    targets,
+    thresholds,
+    resize_align_corners=True,
+    mode=args.c2s_pseudo_label_mode,
+  )
 
   pixels_u = pseudo_masks == 255
   pixels_b = pseudo_masks == bg_class
   pixels_fg = ~(pixels_u | pixels_b)
   samples_fg = pixels_fg.sum((1, 2)) > 0
 
-  loss_s = criterion_s(outputs["masks_seg"][samples_fg], pseudo_masks[samples_fg].to(DEVICE))
+  conf_pixels_c2s = pixels_u.cpu().float().mean()
+
+  if samples_fg.sum() == 0:
+    # All label maps have only bg or void class.
+    loss_c2s = torch.zeros_like(loss_c)
+  else:
+    loss_c2s = criterion_c2s(outputs["masks_seg"][samples_fg, ...], pseudo_masks[samples_fg, ...].to(DEVICE))
 
   # (3) Consistency loss.
-  loss_b = torch.zeros(())
-  pprobs_sal = outputs["masks_seg"].detach()
-  pprobs_sal = torch.softmax(pprobs_sal / t_b, dim=1)
-  if not w_b:
-    ...
-  if 1 in b_modes:
-    loss_b += criterion_b(outputs["masks_sal"], pprobs_sal[:, bg_class].unsqueeze(1))
-  if 2 in b_modes:
-    # Branches Mutual Promotion
-    # https://arxiv.org/pdf/2308.04949.pdf
+  probs_seg = torch.softmax(logit_seg, dim=1)
+  conf_pixels_s2c = torch.zeros_like(conf_pixels_c2s)
 
-    pmasks_sal = pprobs_sal.argmax(dim=1)
-    p_conf_sal = pprobs_sal.max(1, keepdim=True)[0] > sigma_b
-    pmasks_sal[~p_conf_sal] = 255
+  if not w_s2c:
+    loss_s2c = torch.zeros(()).to(loss_c)
+  elif s2c_mode == "bce":
+    prob_bg = 1 - probs_seg[:, bg_class].unsqueeze(1)
+    loss_s2c = criterion_s2c(outputs["masks_sal"], prob_bg)
+    # conf_pixels_s2c = (prob_bg - 0.5).abs() >= s2c_sigma  # conf >= 0.9
+    conf_pixels_s2c = (prob_bg < (1 - s2c_sigma)) | (prob_bg >= s2c_sigma)
 
-    if model.use_saliency_head:
-      masks_bg = outputs["masks_sal"]
-    else:
-      masks_bg = outputs["masks_seg"][:, bg_class].unsqueeze(1).detach()
+    loss_s2c = torch.sum(loss_s2c * conf_pixels_s2c) / conf_pixels_s2c.sum().clamp_(min=1.)
 
-    masks_c = torch.concat((masks_bg, outputs["features_c"]), dim=1)  # B(C+1)HW
-    masks_c = resize_tensor(masks_c, pmasks_sal.shape[2:], "bilinear", align_corners=True)
-    loss_b = criterion_b(masks_c, pmasks_sal)
+    conf_pixels_s2c = conf_pixels_s2c.float().mean()
+
+  else:
+    logit_sal = (
+      outputs["masks_sal"]
+      if model.use_sal_head
+      else logit_seg[:, bg_class].unsqueeze(1)
+    )
+
+    feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
+    masks_c = torch.concat((logit_sal, feats_c), dim=1)  # B(C+1)HW
+    conf_pixels_s2c += 1.0
+
+    if s2c_mode == "kld":
+      ## KL Divergence Loss. (KLD)
+      T = s2c_sigma
+
+      loss_s2c = (T ** 2) * criterion_s2c(
+        gap2d(masks_c) / T,
+        torch.log_softmax(gap2d(logit_seg) / T, dim=1)
+      )
+
+    if s2c_mode == "mp":
+      # Branches Mutual Promotion
+      # https://arxiv.org/pdf/2308.04949.pdf
+
+      pmasks_sal = probs_seg.argmax(dim=1)
+      conf_pixels_s2c = probs_seg.max(1)[0] > s2c_sigma
+      pmasks_sal[~conf_pixels_s2c] = 255
+      loss_s2c = criterion_c2s(masks_c, pmasks_sal)
+
+      conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
   # (4) Uncertain loss. (Push outputs for classes not in `targets` down.)
   if not w_u or pixels_u.sum() == 0:
-    loss_u = torch.zeros(())
+    loss_u = torch.zeros(()).to(loss_c)
   else:
     y_n = to_2d(F.pad(1 - targets, (1, 0), value=0.0)).to(DEVICE)  # Mark background=0 (occurs). # B, C
     loss_u = torch.clamp(1 - torch.sigmoid(segms), min=0.0005, max=0.9995)
     loss_u = (-y_n * torch.log(loss_u)).sum(dim=1)
     loss_u = loss_u[pixels_u].mean()
 
-  loss = loss_c + w_s * loss_s  + w_u * loss_u + w_b * loss_b
+  loss = w_c * loss_c + w_c2s * loss_c2s + w_s2c * loss_s2c + w_u * loss_u
 
   metrics = {
     "loss": loss,
     "loss_c": loss_c,
-    "loss_s": loss_s,
-    "loss_b": loss_b,
+    "loss_c2s": loss_c2s,
+    "loss_s2c": loss_s2c,
     "loss_u": loss_u,
+    "conf_pixels_s2c": conf_pixels_s2c,
+    "conf_pixels_c2s": conf_pixels_c2s,
   }
 
   return loss, metrics
@@ -383,7 +435,7 @@ def valid_step(
   info_seg = data_source.segmentation_info
 
   meters_cam = {t: MIoUCalculator.from_dataset_info(info_cls) for t in thresholds}
-  meters_seg = MIoUCalculator(info_cls.classes, bg_class=info_seg.bg_class, include_bg=False)
+  meters_seg = MIoUCalculator.from_dataset_info(info_seg)
 
   start = time.time()
 
@@ -395,7 +447,8 @@ def valid_step(
       targets = to_numpy(targets)
       masks = to_numpy(masks)
 
-      logits, features, pred_masks = model(inputs.to(device), with_cam=True, with_mask=True)
+      outputs = model(inputs.to(device), with_cam=True, with_mask=True)
+      logits, features, pred_masks = outputs["logits_c"], outputs["features_c"], outputs["masks_seg"]
 
       preds = to_numpy(torch.sigmoid(logits.cpu().float()))
       cams = to_numpy(make_cam(features.cpu().float())) * targets[..., np.newaxis, np.newaxis]
@@ -412,8 +465,8 @@ def valid_step(
 
       if step == 0 and log_samples:
         inputs = to_numpy(inputs)
-        wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes)
-        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, info_seg.void_class)
+        wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes, tag="val/priors")
+        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, info_seg.void_class, tag="val/segmentation")
 
       if max_steps and step >= max_steps:
         break
@@ -421,7 +474,7 @@ def valid_step(
   elapsed = time.time() - start
 
   miou, miou_fg, iou, FP, FN = meters_seg.get(clear=True, detail=True)
-  iou = [round(iou[c], 2) for c in info_cls.classes]
+  iou = [round(iou[c], 2) for c in info_seg.classes]
 
   preds_ = np.concatenate(preds_, axis=0)
   targets_ = np.concatenate(targets_, axis=0)
@@ -455,7 +508,7 @@ def valid_step(
   return results
 
 
-def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_corners=None):
+def get_pseudo_label(images, cams, masks_bg, targets, thresholds, resize_align_corners=None, mode="cam"):
   sizes = images.shape[2:]
 
   cams = cams.cpu().to(torch.float32) * to_2d(targets)
@@ -465,16 +518,24 @@ def get_pseudo_label(images, cams, targets, bg_t=0.05, fg_t=0.4, resize_align_co
 
   images = to_numpy(images)
   targets = to_numpy(targets)
+  masks_bg = to_numpy(masks_bg)
 
   with Pool(processes=len(images)) as pool:
-    args = [(i, c, t, bg_t, fg_t) for i, c, t in zip(images, cams, targets)]
-    masks = pool.map(_get_pseudo_label, args)
 
-  return torch.as_tensor(np.asarray(masks, dtype="int64"))
+    if mode == "cam":
+      _fn = _get_pseudo_label_from_cams
+      _args = [(i, c, t, thresholds) for i, c, t in zip(images, cams, targets)]
+    else:
+      _fn = _get_pseudo_label_from_mutual_promotion
+      _args = [(i, c, t, m) for i, c, t, m in zip(images, cams, targets, masks_bg)]
+
+    masks_bg = pool.map(_fn, _args)
+
+  return torch.as_tensor(np.asarray(masks_bg, dtype="int64"))
 
 
-def _get_pseudo_label(args):
-  image, cam, target, bg_t, fg_t = args
+def _get_pseudo_label_from_cams(args):
+  image, cam, target, (bg_t, fg_t) = args
   image = denormalize(image, *datasets.imagenet_stats())
 
   labels = target > 0.5
@@ -495,6 +556,20 @@ def _get_pseudo_label(args):
 
   return mask
 
+
+def _get_pseudo_label_from_mutual_promotion(args):
+  image, cam, target, bg_mask = args
+  image = denormalize(image, *datasets.imagenet_stats())
+
+  labels = target > 0.5
+  cam = cam[labels]
+  keys = np.concatenate(([0], np.where(labels)[0] + 1))
+
+  logit = np.concatenate((bg_mask[np.newaxis, ...], cam))
+  mask = np.argmax(logit, axis=0)
+  mask = keys[crf_inference_label(image, mask, n_labels=keys.shape[0])]
+
+  return mask
 
 if __name__ == '__main__':
   args = parser.parse_args()

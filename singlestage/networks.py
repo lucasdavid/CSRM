@@ -5,9 +5,7 @@ import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
 from core.networks import *
-from datasets import imagenet_stats
-from tools.ai.demo_utils import crf_inference_label, denormalize
-from tools.ai.torch_utils import gap2d, make_cam, resize_tensor, to_numpy
+from tools.ai.torch_utils import gap2d, resize_tensor
 
 
 class SingleStageModel(Backbone):
@@ -24,10 +22,7 @@ class SingleStageModel(Backbone):
     trainable_stem=False,
     trainable_backbone=True,
     use_group_norm=False,
-    use_saliency_head=False,
-    criterion_c=None,
-    criterion_s=None,
-    criterion_b=None,
+    use_sal_head=False,
   ):
     super().__init__(
       model_name,
@@ -41,26 +36,24 @@ class SingleStageModel(Backbone):
     cin = self.out_features
     norm_fn = group_norm if use_group_norm else nn.BatchNorm2d
 
-    self.aspp = ASPP(cin, output_stride=16, norm_fn=norm_fn)
-    self.decoder = Decoder(num_classes_segm or (num_classes + 1), 256, norm_fn)
-
     self.num_classes = num_classes
     self.regularization = regularization
-    self.use_saliency_head = use_saliency_head
+    self.use_sal_head = use_sal_head
+
+    # Pretrained parameters
 
     self.classifier = nn.Conv2d(cin, num_classes, 1, bias=False)
 
+    # Scratch parameters
+
+    self.aspp = ASPP(cin, output_stride=16, norm_fn=norm_fn)
+    self.decoder = Decoder(num_classes_segm or (num_classes + 1), 256, norm_fn)
+
     self.from_scratch_layers += [*self.aspp.modules(), *self.decoder.modules()]
 
-    if use_saliency_head:
-      self.aspp_s = ASPP(cin, output_stride=16, norm_fn=norm_fn)
-      self.decoder_s = Decoder(1, 256, norm_fn)
-
-      self.from_scratch_layers += [*self.aspp_s.modules(), *self.decoder_s.modules()]
-
-    self.criterion_c = criterion_c or torch.nn.MultiLabelSoftMarginLoss()
-    self.criterion_s = criterion_s or torch.nn.CrossEntropyLoss(ignore_index=255)
-    self.criterion_b = criterion_b or torch.nn.BCEWithLogitsLoss()  # or torch.nn.MultiLabelSoftMarginLoss()
+    if use_sal_head:
+      self.saliency_head = nn.Conv2d(cin, 1, 1)
+      self.from_scratch_layers += [self.saliency_head]
 
   def forward_features(self, x):
     x = self.stage1(x)
@@ -78,9 +71,8 @@ class SingleStageModel(Backbone):
     outputs = self.classification_branch(features_s5, with_cam=with_cam or with_saliency)
 
     if with_saliency:
-      features_c = outputs["features_c"]
-      masks = self.saliency_branch(features_c, features_s5, features_s2)
-      # masks = resize_tensor(masks, inputs.shape[2:], align_corners=True) if resize_mask else masks
+      masks = self.saliency_branch(outputs["features_c"], features_s5, features_s2)
+      masks = resize_tensor(masks, inputs.shape[2:], align_corners=True) if resize_mask else masks
       outputs["masks_sal"] = masks
 
     if with_mask:
@@ -91,12 +83,10 @@ class SingleStageModel(Backbone):
     return outputs
 
   def saliency_branch(self, features_c, features_s5, features_s2):
-    if not self.use_saliency_head:
+    if not self.use_sal_head:
       return features_c.sum(dim=1, keepdim=True)
 
-    x = self.aspp_s(features_s5)
-    x = self.decoder(x, features_s2)
-
+    x = self.saliency_head(features_s5)
     return x
 
   def segmentation_branch(self, features, features_low):
@@ -130,6 +120,4 @@ if __name__ == "__main__":
     regularization=None,  # regularization=args.regularization,
     trainable_stem=True,  # trainable_stem=args.trainable_stem,
     trainable_backbone=True,
-    criterion_c=torch.nn.MultiLabelSoftMarginLoss().to(DEVICE),
-    criterion_s=torch.nn.CrossEntropyLoss(ignore_index=255).to(DEVICE),
   )

@@ -50,7 +50,7 @@ ARCHITECTURE=resnest269
 TRAINABLE_STEM=true
 TRAINABLE_BONE=true
 DILATED=false
-USE_SALIENCY_HEAD=true
+USE_SAL_HEAD=true
 MODE=normal
 REGULAR=none
 
@@ -66,6 +66,7 @@ ACCUMULATE_STEPS=1
 
 LR_ALPHA_SCRATCH=10.0
 LR_ALPHA_BIAS=1.0
+LR_POLY_POWER=0.9
 
 MIXED_PRECISION=true
 PERFORM_VALIDATION=true
@@ -110,76 +111,29 @@ CRF_T=0
 CRF_GT=0.7
 
 
-train_poc() {
+train_ss() {
   echo "=================================================================="
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,poc" \
-    WANDB_RUN_GROUP="$DATASET-$ARCH-poc" \
-    CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/cam/train_poc.py \
-    --tag $TAG \
-    --lr $LR \
-    --num_workers $WORKERS_TRAIN \
-    --batch_size $BATCH_SIZE \
-    --accumulate_steps $ACCUMULATE_STEPS \
-    --mixed_precision $MIXED_PRECISION \
-    --architecture $ARCHITECTURE \
-    --dilated $DILATED \
-    --mode $MODE \
-    --trainable-stem $TRAINABLE_STEM \
-    --regularization $REGULAR \
-    --oc-architecture $OC_ARCHITECTURE \
-    --oc-pretrained $OC_PRETRAINED \
-    --oc-regularization $OC_REGULAR \
-    --oc-mask-globalnorm $OC_MASK_GN \
-    --image_size $IMAGE_SIZE \
-    --min_image_size $MIN_IMAGE_SIZE \
-    --max_image_size $MAX_IMAGE_SIZE \
-    --augment $AUGMENT \
-    --cutmix_prob $CUTMIX \
-    --mixup_prob $MIXUP \
-    --label_smoothing $LABELSMOOTHING \
-    --max_epoch $EPOCHS \
-    --alpha $P_ALPHA \
-    --alpha_init $P_INIT \
-    --alpha_schedule $P_SCHEDULE \
-    --oc-alpha $OC_ALPHA \
-    --oc-alpha-init $OC_INIT \
-    --oc-alpha-schedule $OC_SCHEDULE \
-    --oc-strategy $OC_STRATEGY \
-    --oc-focal-momentum $OC_F_MOMENTUM \
-    --oc-focal-gamma $OC_F_GAMMA \
-    --validate $PERFORM_VALIDATION \
-    --validate_max_steps $VALIDATE_MAX_STEPS \
-    --validate_thresholds $VALIDATE_THRESHOLDS \
-    --dataset $DATASET \
-    --domain_train $DOMAIN_TRAIN \
-    --domain_valid $DOMAIN_VALID \
-    --data_dir $DATA_DIR;
-}
-
-train_singlestage() {
-  echo "=================================================================="
-  echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
-  echo "=================================================================="
-
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ss" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,m:$S2C_MODE" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-ss" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/train_singlestage.py \
+    $PY scripts/train_ss.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
+    --s2c_mode $S2C_MODE \
+    --s2c_sigma $S2C_SIGMA \
     --optimizer $OPTIMIZER \
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
     --lr_alpha_bias $LR_ALPHA_BIAS \
+    --lr_poly_power $LR_POLY_POWER \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
     --mixed_precision $MIXED_PRECISION \
     --architecture $ARCHITECTURE \
-    --use_saliency_head $USE_SALIENCY_HEAD \
+    --use_sal_head $USE_SAL_HEAD \
     --dilated $DILATED \
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
@@ -195,7 +149,7 @@ train_singlestage() {
     --max_epoch $EPOCHS \
     --dataset $DATASET \
     --data_dir $DATA_DIR \
-    --domain_train $DOMAIN_TRAIN \
+    --domain_train $DOMAIN_VALID \
     --domain_valid $DOMAIN_VALID_SEG \
     --progress $PROGRESS \
     --validate $PERFORM_VALIDATION \
@@ -204,6 +158,9 @@ train_singlestage() {
     --device $DEVICE \
     --restore $RESTORE \
     --num_workers $WORKERS_TRAIN;
+
+  # TODO: fix these domains later.
+
 }
 
 inference_priors() {
@@ -241,33 +198,95 @@ evaluate_priors() {
     --num_workers $WORKERS_INFER;
 }
 
-LR=0.01  # voc12
+LR=0.007  # voc12
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=false
 ARCHITECTURE=resnest101
 ARCH=rs101
-DILATED=true
 OC_ARCHITECTURE=$ARCHITECTURE
 
+EPOCHS=10
 BATCH_SIZE=16
-ACCUMULATE_STEPS=1
+ACCUMULATE_STEPS=2
 LABELSMOOTHING=0
 AUGMENT=colorjitter  # none for DeepGlobe
+
+S2C_MODE=bce
+S2C_SIGMA=1.0
 
 EID=r1  # Experiment ID
 
 # RESTORE=experiments/models/vanilla/voc12-rn50-ra-ls.pth
 # RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
 # RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
+# RESTORE=experiments/models/puzzle/ResNeSt50@Puzzle@optimal.pth
 RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-lsra-r4.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rs50fe-rals-ce-lr0.01-cwnone-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
 
-USE_SALIENCY_HEAD=false
-TAG=ss/$DATASET-$ARCH-lr$LR-ra-seggt_wb0_wu0-$EID
-train_singlestage
+# # KL Divergence(concat(SEG[bg]), CAMs), SEG) (mIoU=NaN)
+# S2C_MODE="kld"
+# S2C_SIGMA=10.0  # KL temperature
+# USE_SAL_HEAD=false
+# TAG=ss/$DATASET-$ARCH-lr$LR-seggt_wu0-$S2C_MODE-$EID
+# train_ss
+
+# # KL Divergence(concat(SEG[bg]), CAMs), SEG) (mIoU=NaN)
+# S2C_MODE="kld"
+# S2C_SIGMA=10.0  # KL temperature
+# USE_SAL_HEAD=true
+# TAG=ss/$DATASET-$ARCH-lr$LR-seggt_wu0-$S2C_MODE-$EID
+# train_ss
+
+# # BCE(CAMs, 1 - SEG[bg]) (mIoU=70.414)
+# S2C_MODE="bce"
+# S2C_SIGMA=0.9  # initial min bg pixel confidence (conf_p := prob[bg] >= lerp(S2C_SIGMA, 0.5, 1))
+# USE_SAL_HEAD=false
+# TAG=ss/$DATASET-$ARCH-lr$LR-seggt_wu0-$S2C_MODE-$EID
+# train_ss
+
+# # Branches Mutual Promotion >> sum(CE(concat(SEG[bg]), CAMs), SEG) * conf_p) / conf_p.count (mIoU=70.414)
+# S2C_MODE="mp"
+# S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+# USE_SAL_HEAD=false
+# TAG=ss/$DATASET-$ARCH-lr$LR-sal-seggt_wu0-$S2C_MODE-$EID
+# train_ss
+
+# # Branches Mutual Promotion >> sum(CE(concat(SEG[bg]), CAMs), SEG) * conf_p) / conf_p.count (mIoU=70.791)
+# S2C_MODE="mp"
+# S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+# USE_SAL_HEAD=true
+# TAG=ss/$DATASET-$ARCH-lr$LR-sal-seggt_wu0-$S2C_MODE-$EID
+# train_ss
+
+# Branches Mutual Promotion >> sum(CE(concat(SEG[bg]), CAMs), SEG) * conf_p) / conf_p.count (mIoU=?)
+S2C_MODE="mp"
+S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+USE_SAL_HEAD=false
+LR_POLY_POWER=0.9
+TAG=ss/$DATASET-$ARCH-lr${LR}c-pw$LR_POLY_POWER-wu0-$S2C_MODE-$EID
+# train_ss
+
+# Branches Mutual Promotion >> sum(CE(concat(SEG[bg]), CAMs), SEG) * conf_p) / conf_p.count (mIoU=?)
+S2C_MODE="mp"
+S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+USE_SAL_HEAD=true
+LR_POLY_POWER=0.0
+TAG=ss/$DATASET-$ARCH-lr${LR}c-wu0-$S2C_MODE-$EID
+# train_ss
+
+
+S2C_MODE="mp"
+S2C_SIGMA=0.5  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+USE_SAL_HEAD=false
+LR_POLY_POWER=0.9
+DILATED=true
+TAG=ss/$DATASET-${ARCH}d-lr${LR}c-wu0-$S2C_MODE-$EID
+train_ss
+
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors
 # DOMAIN=$DOMAIN_VALID inference_priors

@@ -28,7 +28,7 @@
         // "--lr_alpha_scratch", "1.0", "--lr_alpha_bias", "1.0",
         "--data_dir", "/home/ldavid/workspace/datasets/VOCdevkit/VOC2012",
         "--validate_max_steps", "2", "--progress", "false",
-        "--use_saliency_head", "true"
+        "--use_sal_head", "true"
       ],
       "justMyCode": false
     }
