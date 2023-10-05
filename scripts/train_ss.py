@@ -327,6 +327,7 @@ def train_step(
   s2c_mode: str,
   c2s_mode: str,
   bg_class: int,
+  void_class: int = 255,
 ):
   criterion_c, criterion_c2s, criterion_s2c = criterions
 
@@ -353,12 +354,12 @@ def train_step(
       c2s_sigma=c2s_sigma,
     )
 
-  pixels_u = pseudo_masks == 255
+  pixels_u = pseudo_masks == void_class
   pixels_b = pseudo_masks == bg_class
   pixels_fg = ~(pixels_u | pixels_b)
   samples_fg = pixels_fg.sum((1, 2)) > 0
 
-  conf_pixels_c2s = pixels_u.cpu().float().mean()
+  conf_pixels_c2s = (~pixels_u.cpu()).float().mean()
 
   if samples_fg.sum() == 0:
     # All label maps have only bg or void class.
@@ -397,8 +398,8 @@ def train_step(
       T = s2c_sigma
 
       loss_s2c = (T ** 2) * criterion_s2c(
-        gap2d(masks_c) / T,
-        torch.log_softmax(gap2d(logit_seg) / T, dim=1)
+        torch.log_softmax(masks_c / T, dim=1),
+        torch.softmax(logit_seg / T, dim=1)
       )
 
     if s2c_mode == "mp":
@@ -407,7 +408,7 @@ def train_step(
 
       pmasks_sal = probs_seg.argmax(dim=1)
       conf_pixels_s2c = probs_seg.max(1)[0] > s2c_sigma
-      pmasks_sal[~conf_pixels_s2c] = 255
+      pmasks_sal[~conf_pixels_s2c] = void_class
       loss_s2c = criterion_c2s(masks_c, pmasks_sal)
 
       conf_pixels_s2c = conf_pixels_s2c.float().mean()
