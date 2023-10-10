@@ -1,3 +1,4 @@
+from typing import Tuple, Union
 import torch.nn as nn
 
 from core.networks import *
@@ -19,8 +20,9 @@ class SingleStageModel(Backbone):
     trainable_backbone=True,
     use_group_norm=False,
     use_sal_head=False,
-    use_rep_head=False,
+    use_rep_head=True,
     rep_output_dim=256,
+    dropout: Union[float, Tuple[float, float]] = 0.1,
   ):
     super().__init__(
       model_name,
@@ -28,26 +30,26 @@ class SingleStageModel(Backbone):
       dilated=dilated,
       strides=strides,
       trainable_stem=trainable_stem,
-      trainable_backbone=trainable_backbone,
+      trainable_backbone=True,  # This will be performed up ahead.
     )
 
     cin = self.out_features
     norm_fn = group_norm if use_group_norm else nn.BatchNorm2d
 
     self.num_classes = num_classes
+    self.num_classes_segm = num_classes_segm or num_classes + 1
     self.regularization = regularization
+    self.trainable_backbone = trainable_backbone
     self.use_sal_head = use_sal_head
     self.use_rep_head = use_rep_head
+    self.dropout = [dropout, dropout] if isinstance(dropout, float) else dropout
 
-    # Pretrained parameters
-
+    ## Pretrained parameters
     # self.backbone = ...
-    self.classifier = nn.Conv2d(cin, num_classes, 1, bias=False)
+    self.classifier = nn.Conv2d(cin, self.num_classes, 1, bias=False)
 
-    # Scratch parameters
-
+    ## Scratch parameters
     self.aspp = ASPP(cin, output_stride=16, norm_fn=norm_fn)
-    # self.decoder = Decoder(num_classes_segm or (num_classes + 1), 256, norm_fn)
 
     self.project = nn.Sequential(
       nn.Conv2d(256, 48, 1, bias=False),
@@ -56,15 +58,15 @@ class SingleStageModel(Backbone):
     )
 
     self.decoder = nn.Sequential(
-      nn.Conv2d(304, 256, kernel_size=3, stride=1, padding=1, bias=False),
+      nn.Conv2d(304, 256, 3, padding=1, bias=False),
       norm_fn(256),
       nn.ReLU(inplace=True),
-      nn.Dropout(0.5),
-      nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=False),
+      nn.Dropout(self.dropout[0]),
+      nn.Conv2d(256, 256, 3, padding=1, bias=False),
       norm_fn(256),
       nn.ReLU(inplace=True),
-      nn.Dropout(0.1),
-      nn.Conv2d(256, num_classes, 1),
+      nn.Dropout(self.dropout[1]),
+      nn.Conv2d(256, self.num_classes_segm, 1),
     )
 
     self.from_scratch_layers += [*self.aspp.modules(), *self.project.modules(), *self.decoder.modules()]
@@ -82,15 +84,14 @@ class SingleStageModel(Backbone):
       )
       self.from_scratch_layers += [*self.representation.modules()]
 
-    self.initialize(self.from_scratch_layers)
+    if not trainable_backbone:
+      # Do not frozen stage 5, so rep layer can be trained.
+      frozen_stages = [self.stage1, self.stage2, self.stage3, self.stage4]
+      self.not_training.extend(frozen_stages)
+      for stage in frozen_stages:
+        set_trainable_layers(stage, trainable=False)
 
-  def initialize(self, modules):
-    for m in modules:
-      if isinstance(m, nn.Conv2d):
-        torch.nn.init.kaiming_normal_(m.weight)
-      elif isinstance(m, nn.BatchNorm2d):
-        m.weight.data.fill_(1)
-        m.bias.data.zero_()
+    self.initialize(self.from_scratch_layers)
 
   def forward_features(self, x):
     x = self.stage1(x)
@@ -117,13 +118,15 @@ class SingleStageModel(Backbone):
 
       if with_saliency:
         masks = self.saliency_branch(outputs["features_c"], features)
-        masks = resize_tensor(masks, inputs.shape[2:], align_corners=True) if resize_mask else masks
         outputs["masks_sal"] = masks
+        if resize_mask:
+          outputs["masks_sal_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
 
       if with_mask:
         masks = self.decoder(features)
-        masks = resize_tensor(masks, inputs.shape[2:], align_corners=True) if resize_mask else masks
         outputs["masks_seg"] = masks
+        if resize_mask:
+          outputs["masks_seg_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
 
       if with_rep and self.use_rep_head:
         rep = self.representation(features)
