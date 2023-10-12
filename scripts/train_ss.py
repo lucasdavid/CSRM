@@ -74,6 +74,7 @@ parser.add_argument('--nesterov', default=True, type=str2bool)
 parser.add_argument('--lr_poly_power', default=0.9, type=float)
 parser.add_argument('--lr_alpha_scratch', default=10., type=float)
 parser.add_argument('--lr_alpha_bias', default=2., type=float)
+parser.add_argument('--grad_max_norm', default=None, type=float)
 
 parser.add_argument('--image_size', default=512, type=int)
 parser.add_argument('--min_image_size', default=320, type=int)
@@ -139,7 +140,7 @@ def train_singlestage(args, wb_run, model_path):
     torch.nn.CrossEntropyLoss(ignore_index=255, label_smoothing=args.label_smoothing).to(DEVICE),
     torch.nn.BCEWithLogitsLoss(reduction="none").to(DEVICE) if args.s2c_mode == "bce"
       else torch.nn.KLDivLoss(reduction="batchmean").to(DEVICE) if args.s2c_mode == "kld"
-      else None,  # if args.s2c_mode == "mp"
+      else None,  # if args.s2c_mode == "mp"  (It will use the same crossentropy as s2c.)
   )
 
   # Network
@@ -215,13 +216,13 @@ def train_singlestage(args, wb_run, model_path):
 
         # Default
         w_c = w_c2s = 1
-        w_u = 1
 
         if args.warmup_epochs and epoch < args.warmup_epochs:
           w_s2c = 0
-          # w_u = 0
+          w_u = 0
         else:
           w_s2c = linear_schedule(optimizer.global_step, optimizer.max_step, 0.1, 1.0, 1.0)
+          w_u = 0.1
 
           if args.s2c_mode == "bce":
             # print("s2c_mode is BCE => setting s2c_sigma=lerp(0.9, 0.5, 1, max).")
@@ -261,6 +262,9 @@ def train_singlestage(args, wb_run, model_path):
         scaler.scale(loss / args.accumulate_steps).backward()
 
         if (step + 1) % args.accumulate_steps == 0:
+          if args.grad_max_norm:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_max_norm)
           scaler.step(optimizer)
           scaler.update()
           optimizer.zero_grad()

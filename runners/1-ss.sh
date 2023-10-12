@@ -68,6 +68,7 @@ ACCUMULATE_STEPS=1
 LR_ALPHA_SCRATCH=10.0
 LR_ALPHA_BIAS=1.0
 LR_POLY_POWER=0.9
+GRAD_MAX_NORM=1.
 
 MIXED_PRECISION=true
 PERFORM_VALIDATION=true
@@ -107,6 +108,7 @@ train_ss() {
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
     --lr_alpha_bias $LR_ALPHA_BIAS \
     --lr_poly_power $LR_POLY_POWER \
+    --grad_max_norm $GRAD_MAX_NORM \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
     --mixed_precision $MIXED_PRECISION \
@@ -183,7 +185,7 @@ ARCHITECTURE=resnest101
 ARCH=rs101
 
 EPOCHS=30
-MAX_STEPS=182  # 1464 (voc12 train samples) // 16 = 91 steps.
+MAX_STEPS=145  # 1464 (voc12 train samples) // 16 = 91 steps.
 BATCH_SIZE=10
 ACCUMULATE_STEPS=2
 LABELSMOOTHING=0
@@ -195,7 +197,7 @@ WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_
 C2S_MODE=cam
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 
-EID=r1  # Experiment ID
+EID=r2  # Experiment ID
 
 # RESTORE=experiments/models/vanilla/voc12-rn50-ra-ls.pth
 # RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
@@ -207,7 +209,7 @@ RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
 
-TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-$EID
+TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-wu0.1-$EID
 train_ss
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors
