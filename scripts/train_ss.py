@@ -1,29 +1,29 @@
 import argparse
 import os
-from multiprocessing import Pool
+import time
 from functools import partial
+from multiprocessing import Pool
 from typing import List
 
 import numpy as np
 import sklearn.metrics as skmetrics
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import datasets
 import wandb
-from core.networks import *
 from singlestage import SingleStageModel, reco
-from tools.ai.augment_utils import *
-from tools.ai.demo_utils import *
+from tools.ai.demo_utils import crf_inference_label, denormalize
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
-from tools.ai.optim_utils import *
-from tools.ai.randaugment import *
+from tools.ai.optim_utils import get_optimizer, linear_schedule
 from tools.ai.torch_utils import *
 from tools.general import wandb_utils
-from tools.general.io_utils import *
-from tools.general.time_utils import *
+from tools.general.io_utils import create_directory, str2bool
+from tools.general.time_utils import Timer
+from tools.ai import augment_utils
 
 parser = argparse.ArgumentParser()
 
@@ -48,7 +48,7 @@ parser.add_argument('--trainable-stem', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
 parser.add_argument('--use_sal_head', default=False, type=str2bool)
 parser.add_argument('--use_rep_head', default=True, type=str2bool)
-parser.add_argument('--dilated', default=True, type=str2bool)
+parser.add_argument('--dilated', default=False, type=str2bool)
 parser.add_argument('--use_gn', default=True, type=str2bool)
 parser.add_argument('--dropout', default=0.1, type=float)
 parser.add_argument('--restore', default=None, type=str)
@@ -123,8 +123,8 @@ def train_singlestage(args, wb_run, model_path):
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
   train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
 
-  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True)
-  valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True)
+  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
+  valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
   log_dataset(args.dataset, train_dataset, tt, tv)
 
   step_val = args.max_steps or len(train_loader)
@@ -165,6 +165,10 @@ def train_singlestage(args, wb_run, model_path):
       if m not in state_dict:
         print("    Skip init:", m)
     model.load_state_dict(state_dict, strict=False)
+  else:
+    model.from_scratch_layers.append(model.classifier)
+    model.initialize([model.classifier])
+
   log_model("SingleStage", model, args)
 
   param_groups, param_names = model.get_parameter_groups(with_names=True)
@@ -257,6 +261,7 @@ def train_singlestage(args, wb_run, model_path):
             s2c_sigma=s2c_sigma,
             c2s_sigma=c2s_sigma,
             bg_class=ts.segmentation_info.bg_class,
+            augment=args.augment,
           )
 
         scaler.scale(loss / args.accumulate_steps).backward()
@@ -354,32 +359,51 @@ def train_step(
   s2c_mode: str,
   c2s_mode: str,
   bg_class: int,
+  augment: str = "none",
 ):
   criterion_c, criterion_c2s, criterion_s2c = criterions
 
+  with torch.no_grad():
+    teacher_outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
+    features_cls_teacher = teacher_outputs["features_c"].cpu()
+    logit_seg_large_teacher = teacher_outputs["masks_seg_large"].cpu()
+    if model.use_sal_head:
+      logit_sal_teacher = teacher_outputs["masks_sal_large"].cpu()
+    else:
+      logit_sal_teacher = logit_seg_large_teacher[:, bg_class].cpu().unsqueeze(1)
+
+    if c2s_mode == "gt":  # only a sanity test.
+      pseudo_masks = true_masks
+    else:
+      pseudo_masks = get_pseudo_label(
+        images,
+        true_labels,
+        features_cls_teacher,
+        masks_bg=None, # probs_seg_large[:, bg_class],
+        thresholds=thresholds,
+        resize_align_corners=True,
+        mode=c2s_mode,
+        c2s_sigma=c2s_sigma,
+      )
+
+    if "cutmix" in augment:
+      (
+        images,
+        true_labels,
+        pseudo_masks,
+        logit_seg_large_teacher,
+        logit_sal_teacher,
+      ) = augment_cutmix_batch(
+        images, true_labels, pseudo_masks, logit_seg_large_teacher, logit_sal_teacher, beta=1.0
+      )
+
   # Forward
-  outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
+  outputs = model(images, with_saliency=True, with_mask=True, with_rep=True)
 
   # (1) Classification loss.
   loss_c = criterion_c(outputs["logits_c"], label_smoothing(true_labels, ls).to(DEVICE))
-  logit_seg_large = outputs["masks_seg_large"].detach()
-  probs_seg_large = torch.softmax(logit_seg_large, dim=1)
 
   # (2) Segmentation loss.
-  if c2s_mode == "gt":  # only a sanity test.
-    pseudo_masks = true_masks
-  else:
-    pseudo_masks = get_pseudo_label(
-      images,
-      true_labels,
-      outputs["features_c"],
-      probs_seg_large[:, bg_class],
-      thresholds,
-      resize_align_corners=True,
-      mode=c2s_mode,
-      c2s_sigma=c2s_sigma,
-    )
-
   pixels_unreliable = pseudo_masks == 255
   pixels_background = pseudo_masks == bg_class
   pixels_foreground = ~(pixels_unreliable | pixels_background)
@@ -399,7 +423,8 @@ def train_step(
   if not w_s2c:
     loss_s2c = torch.zeros(()).to(loss_c)
   elif s2c_mode == "bce":
-    prob_bg = 1 - probs_seg_large[:, bg_class].unsqueeze(1)
+    probs_seg_large_teacher = torch.softmax(logit_seg_large_teacher, dim=1)
+    prob_bg = 1 - probs_seg_large_teacher[:, bg_class].unsqueeze(1)
     loss_s2c = criterion_s2c(outputs["masks_sal_large"], prob_bg)
     # conf_pixels_s2c = (prob_bg - 0.5).abs() >= s2c_sigma  # conf >= 0.9
     conf_pixels_s2c = (prob_bg < (1 - s2c_sigma)) | (prob_bg >= s2c_sigma)
@@ -409,14 +434,8 @@ def train_step(
     conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
   else:
-    logit_sal = (
-      outputs["masks_sal_large"]
-      if model.use_sal_head
-      else logit_seg_large[:, bg_class].unsqueeze(1)
-    )
-
-    feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
-    masks_c = torch.concat((logit_sal, feats_c), dim=1)  # B(C+1)HW
+    feats_c = resize_tensor(outputs["features_c"], logit_sal_teacher.shape[2:], "bilinear", align_corners=True)
+    masks_c = torch.concat((logit_sal_teacher, feats_c), dim=1)  # B(C+1)HW
     conf_pixels_s2c += 1.0
 
     if s2c_mode == "kld":
@@ -425,15 +444,17 @@ def train_step(
 
       loss_s2c = (T ** 2) * criterion_s2c(
         torch.log_softmax(masks_c / T, dim=1),
-        torch.softmax(logit_seg_large / T, dim=1)
+        torch.softmax(logit_seg_large_teacher / T, dim=1)
       )
 
     if s2c_mode == "mp":
       # Branches Mutual Promotion
       # https://arxiv.org/pdf/2308.04949.pdf
 
-      pmasks_sal = probs_seg_large.argmax(dim=1)
-      conf_pixels_s2c = probs_seg_large.max(1)[0] > s2c_sigma
+      probs_seg_large_teacher = torch.softmax(logit_seg_large_teacher, dim=1)
+      conf_pixels_s2c, pmasks_sal = probs_seg_large_teacher.max(1)
+
+      conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
       pmasks_sal[~conf_pixels_s2c] = 255
       loss_s2c = criterion_c2s(masks_c, pmasks_sal)
 
@@ -452,7 +473,7 @@ def train_step(
       valid_mask = F.interpolate(valid_mask[:, None, ...], size=pred_all.shape[2:], mode='nearest')
 
       label_all = torch.where(pixels_unreliable, 0, pseudo_masks)
-      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large.shape[1]), size=pred_all.shape[2:], mode="nearest")
+      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large_teacher.shape[1]), size=pred_all.shape[2:], mode="nearest")
 
     loss_u = reco.compute_reco_loss(rep_all, prob_all, label_all, valid_mask,
                                     args.reco_strong_threshold, args.reco_temp,
@@ -559,6 +580,46 @@ def valid_step(
   return results
 
 
+def augment_cutmix_batch(images, labels, masks, lgs_seg, lgs_sal, beta=1.):
+  # images = images.numpy()
+  # labels = labels.numpy()
+  # masks = masks.numpy()
+  # lgs_seg = lgs_seg.numpy()
+  # lgs_sal = lgs_sal.numpy()
+
+  ids = np.arange(len(images), dtype="int")
+  bids = np.asarray([np.random.choice(ids[ids != i]) for i in ids])
+
+  images_mix = images.clone()
+  labels_mix = labels.clone()
+  masks_mix = masks.clone()
+  lgs_seg_mix = lgs_seg.clone()
+  lgs_sal_mix = lgs_sal.clone()
+
+  for idx_a, idx_b in zip(ids, bids):
+    alpha = np.random.beta(beta, beta)
+    bmask_a = np.zeros_like(masks[idx_a])
+    bmask_a[masks[idx_a] == 255] = 255
+    bmask_b = np.ones_like(masks[idx_b])
+    bmask_b[masks[idx_b] == 255] = 255
+
+    _, _, _, b_mask = augment_utils._cutmix(
+      (idx_a, images_mix[idx_a], labels_mix[idx_a], bmask_a),
+      (idx_b, images[idx_b], labels[idx_b], bmask_b),
+      alpha=alpha
+    )
+
+    b_mask = b_mask == 1
+    mask_seg = b_mask.expand(lgs_seg[idx_b].shape)
+    mask_sal = b_mask.expand(lgs_sal[idx_b].shape)
+
+    masks_mix[idx_a][b_mask] = masks[idx_b][b_mask]
+    lgs_seg_mix[idx_a][mask_seg] = lgs_seg[idx_b][mask_seg]
+    lgs_sal_mix[idx_a][mask_sal] = lgs_sal[idx_b][mask_sal]
+
+  return images_mix, labels_mix, masks, lgs_seg, lgs_sal
+
+
 def get_pseudo_label(images, targets, cams, masks_bg, thresholds, resize_align_corners=None, mode="cam", c2s_sigma=0.5, clf_t=0.5):
   sizes = images.shape[2:]
 
@@ -639,6 +700,7 @@ def _get_pseudo_label_from_mutual_promotion(args):
   # print(f"mask={mask.shape} uncertain_pixels={uncertain_pixels.shape}")
 
   return mask
+
 
 if __name__ == '__main__':
   args = parser.parse_args()

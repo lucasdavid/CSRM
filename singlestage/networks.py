@@ -13,7 +13,7 @@ class SingleStageModel(Backbone):
     num_classes=20,
     num_classes_segm=None,
     mode='fix',
-    dilated=True,
+    dilated=False,
     strides=None,
     regularization=None,
     trainable_stem=False,
@@ -45,7 +45,7 @@ class SingleStageModel(Backbone):
     self.dropout = [dropout, dropout] if isinstance(dropout, float) else dropout
 
     ## Pretrained parameters
-    # self.backbone = ...
+    # self.stage1/stage5 = ...
     self.classifier = nn.Conv2d(cin, self.num_classes, 1, bias=False)
 
     ## Scratch parameters

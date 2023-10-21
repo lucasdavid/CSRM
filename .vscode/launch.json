@@ -20,6 +20,7 @@
         "--batch_size", "4",
         // "--loss_b", "l1",
         // "--loss_b", "kld",
+        "--augment", "colorjitter_cutmix",
         "--image_size", "384", "--min_image_size", "224", "--max_image_size", "420",
         "--lr", "0.01", "--wd", "0.001", "--mode", "fix", "--trainable-stem", "false", "--trainable-backbone", "false", "--use_gn", "true",
         "--architecture", "resnet50", "--restore", "experiments/models/vanilla/voc12-rn50-ra-ls.pth",
@@ -28,7 +29,8 @@
         // "--lr_alpha_scratch", "1.0", "--lr_alpha_bias", "1.0",
         "--data_dir", "/home/ldavid/workspace/datasets/VOCdevkit/VOC2012",
         "--validate_max_steps", "2", "--progress", "false",
-        // "--use_sal_head", "true"
+        // "--use_sal_head", "true",
+        "--c2s_mode", "gt",
       ],
       "justMyCode": false
     }
