@@ -433,12 +433,12 @@ def train_step(
 
   with torch.no_grad():
     teacher_outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
-    features_cls_teacher = teacher_outputs["features_c"].cpu()
-    logit_seg_large_teacher = teacher_outputs["masks_seg_large"].cpu()
+    features_cls_t = teacher_outputs["features_c"].cpu()
+    logit_seg_large_t = teacher_outputs["masks_seg_large"].cpu()
     if model.use_sal_head:
-      logit_sal_teacher = teacher_outputs["masks_sal_large"].cpu()
+      logit_sal_t = teacher_outputs["masks_sal_large"].cpu()
     else:
-      logit_sal_teacher = logit_seg_large_teacher[:, bg_class].cpu().unsqueeze(1)
+      logit_sal_t = logit_seg_large_t[:, bg_class].cpu().unsqueeze(1)
 
     if c2s_mode == "gt":  # only a sanity test.
       pseudo_masks = true_masks
@@ -446,7 +446,7 @@ def train_step(
       pseudo_masks = get_pseudo_label(
         images,
         true_labels,
-        features_cls_teacher,
+        features_cls_t,
         masks_bg=None, # probs_seg_large[:, bg_class],
         thresholds=thresholds,
         resize_align_corners=True,
@@ -460,12 +460,15 @@ def train_step(
         images_aug,
         true_labels,
         pseudo_masks,
-        logit_seg_large_teacher,
-        logit_sal_teacher,
+        logit_seg_large_t,
+        logit_sal_t,
       ) = apply_aug(
-        images_aug, true_labels, pseudo_masks, logit_seg_large_teacher, logit_sal_teacher,
+        images_aug, true_labels, pseudo_masks, logit_seg_large_t, logit_sal_t,
         beta=1.0, mix=mix, ignore_class=bg_class,
       )
+
+    logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
+    logit_sal_t = logit_sal_t.float().to(DEVICE)
 
   # Forward
   outputs = model(images_aug.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
@@ -493,7 +496,7 @@ def train_step(
   if not w_s2c:
     loss_s2c = torch.zeros(()).to(loss_c)
   elif s2c_mode == "bce":
-    probs_seg_large_teacher = torch.softmax(logit_seg_large_teacher, dim=1)
+    probs_seg_large_teacher = torch.softmax(logit_seg_large_t, dim=1)
     prob_bg = 1 - probs_seg_large_teacher[:, bg_class].unsqueeze(1)
     loss_s2c = criterion_s2c(outputs["masks_sal_large"], prob_bg)
     # conf_pixels_s2c = (prob_bg - 0.5).abs() >= s2c_sigma  # conf >= 0.9
@@ -504,8 +507,8 @@ def train_step(
     conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
   else:
-    feats_c = resize_tensor(outputs["features_c"], logit_sal_teacher.shape[2:], "bilinear", align_corners=True)
-    masks_c = torch.concat((logit_sal_teacher, feats_c), dim=1)  # B(C+1)HW
+    feats_c = resize_tensor(outputs["features_c"], logit_sal_t.shape[2:], "bilinear", align_corners=True)
+    masks_c = torch.concat((logit_sal_t.to(feats_c), feats_c), dim=1)  # B(C+1)HW
     conf_pixels_s2c += 1.0
 
     if s2c_mode == "kld":
@@ -514,19 +517,19 @@ def train_step(
 
       loss_s2c = (T ** 2) * criterion_s2c(
         torch.log_softmax(masks_c / T, dim=1),
-        torch.softmax(logit_seg_large_teacher / T, dim=1)
+        torch.softmax(logit_seg_large_t / T, dim=1)
       )
 
     if s2c_mode == "mp":
       # Branches Mutual Promotion
       # https://arxiv.org/pdf/2308.04949.pdf
 
-      probs_seg_large_teacher = torch.softmax(logit_seg_large_teacher, dim=1)
+      probs_seg_large_teacher = torch.softmax(logit_seg_large_t, dim=1)
       conf_pixels_s2c, pmasks_sal = probs_seg_large_teacher.max(1)
 
       conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
       pmasks_sal[~conf_pixels_s2c] = 255
-      loss_s2c = criterion_c2s(masks_c, pmasks_sal)
+      loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(DEVICE))
 
       conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
@@ -543,7 +546,7 @@ def train_step(
       valid_mask = F.interpolate(valid_mask[:, None, ...], size=pred_all.shape[2:], mode='nearest')
 
       label_all = torch.where(pixels_unreliable, 0, pseudo_masks)
-      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large_teacher.shape[1]), size=pred_all.shape[2:], mode="nearest")
+      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large_t.shape[1]), size=pred_all.shape[2:], mode="nearest")
 
     loss_u = reco.compute_reco_loss(rep_all, prob_all, label_all, valid_mask,
                                     args.reco_strong_threshold, args.reco_temp,
