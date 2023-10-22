@@ -26,7 +26,7 @@ from tools.ai.torch_utils import *
 from tools.general import wandb_utils
 from tools.general.io_utils import create_directory, str2bool
 from tools.general.time_utils import Timer
-from tools.ai import augment_utils
+from tools.ai.augment_utils import *
 
 parser = argparse.ArgumentParser()
 
@@ -120,25 +120,42 @@ def to_2d(x):
 
 class SegmentationAugmentedDataset(datasets.SegmentationDataset):
 
+  def __init__(
+    self,
+    data_source: datasets.CustomDataSource,
+    image_transform: transforms.Compose = None,
+    tensor_transform: transforms.Compose = None,
+    ignore_bg_images: bool = None,
+    task: Optional[str] = None,
+  ):
+    super().__init__(data_source=data_source, ignore_bg_images=ignore_bg_images, task=task)
+
+    self.image_transform = image_transform
+    self.tensor_transform = tensor_transform
+
   def __getitem__(self, index):
     sample_id, label = self.get_valid_sample(index)
 
     image = self.data_source.get_image(sample_id)
     mask = self.data_source.get_mask(sample_id)
 
-    if self.transform is not None:
-      data = self.transform({"image": image, "mask": mask})
-      image, mask = data["image"], data["mask"]
+    data = self.image_transform({"image": image, "mask": mask})
+    image, mask = data["image"], data["mask"]
 
-    img_s1 = deepcopy(image)
-
+    # strong aug
+    image_s1 = Image.fromarray(image.astype("uint8"))
     if random.random() < 0.8:
-        img_s1 = self._colorjitter(img_s1)
+        image_s1 = self._colorjitter(image_s1)
+    image_s1 = self._grayscale(image_s1)
+    image_s1 = self._blur(image_s1, p=0.5)
 
-    img_s1 = self._grayscale(img_s1)
-    img_s1 = self._blur(img_s1, p=0.5)
+    data = self.tensor_transform({"image": image, "mask": mask})
+    image, mask = data["image"], data["mask"]
 
-    return sample_id, image, img_s1, label, mask
+    data = self.tensor_transform({"image": image_s1, "mask": mask})
+    image_s1 = data["image"]
+
+    return sample_id, image, image_s1, label, mask
 
   _colorjitter = transforms.ColorJitter(0.5, 0.5, 0.5, 0.25)
   _grayscale = transforms.RandomGrayscale(p=0.2)
@@ -153,8 +170,21 @@ class SegmentationAugmentedDataset(datasets.SegmentationDataset):
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  tt, tv = datasets.get_segmentation_transforms(args.min_image_size, args.max_image_size, args.image_size, augment="none")
-  train_dataset = SegmentationAugmentedDataset(ts, transform=tt)
+  _, tv = datasets.get_segmentation_transforms(args.min_image_size, args.max_image_size, args.image_size, augment="none")
+  tt = transforms.Compose([
+    RandomResize_For_Segmentation(args.min_image_size, args.max_image_size, overcrop=True),
+    RandomHorizontalFlip_For_Segmentation(),
+    RandomCrop_For_Segmentation(args.image_size, bg_value=127.5),
+  ])
+
+  train_dataset = SegmentationAugmentedDataset(
+    ts,
+    image_transform=tt,
+    tensor_transform=transforms.Compose([
+      Normalize_For_Segmentation(*datasets.imagenet_stats()),
+      Transpose_For_Segmentation(),
+    ])
+  )
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
 
   train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
@@ -438,7 +468,7 @@ def train_step(
       )
 
   # Forward
-  outputs = model(images_aug, with_saliency=True, with_mask=True, with_rep=True)
+  outputs = model(images_aug.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
 
   # (1) Classification loss.
   loss_c = criterion_c(outputs["logits_c"], label_smoothing(true_labels, ls).to(DEVICE))
