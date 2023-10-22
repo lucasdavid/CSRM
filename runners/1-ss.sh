@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/logs/%j-ss.out
-#SBATCH --time=32:00:00
+#SBATCH --time=24:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -180,22 +180,22 @@ evaluate_priors() {
 LR=0.007  # voc12
 MODE=fix
 TRAINABLE_STEM=false
-TRAINABLE_BONE=false
+TRAINABLE_BONE=true
 ARCHITECTURE=resnet101
 ARCH=rn101
 
-EPOCHS=30
+EPOCHS=60
 MAX_STEPS=145  # 1464 (voc12 train samples) // 16 = 91 steps.
 BATCH_SIZE=10
 ACCUMULATE_STEPS=2
 LABELSMOOTHING=0
-AUGMENT=colorjitter  # none for DeepGlobe
+AUGMENT=colorjitter_classmix  # none for DeepGlobe
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_MODE=gt
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+C2S_MODE=gt
 
 EID=r1  # Experiment ID
 
@@ -211,7 +211,7 @@ EID=r1  # Experiment ID
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
 
-TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-wu0.1-$EID
+TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-classmix-$EID
 train_ss
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors
