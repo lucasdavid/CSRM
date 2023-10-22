@@ -121,7 +121,7 @@ def train_singlestage(args, wb_run, model_path):
   tt, tv = datasets.get_segmentation_transforms(args.min_image_size, args.max_image_size, args.image_size, args.augment)
   train_dataset = datasets.SegmentationDataset(ts, transform=tt)
   valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
-  train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
+  # train_dataset = datasets.apply_augmentation(train_dataset, args.augment, args.image_size, args.cutmix_prob, args.mixup_prob)
 
   train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
@@ -386,15 +386,17 @@ def train_step(
         c2s_sigma=c2s_sigma,
       )
 
-    if "cutmix" in augment:
+    if "mix" in augment and np.random.uniform(0, 1) < 0.5:
+      mix = "cutmix" if "cutmix" in augment else "classmix"
       (
         images,
         true_labels,
         pseudo_masks,
         logit_seg_large_teacher,
         logit_sal_teacher,
-      ) = augment_cutmix_batch(
-        images, true_labels, pseudo_masks, logit_seg_large_teacher, logit_sal_teacher, beta=1.0
+      ) = apply_aug(
+        images, true_labels, pseudo_masks, logit_seg_large_teacher, logit_sal_teacher,
+        beta=1.0, mix=mix, ignore_class=bg_class,
       )
 
   # Forward
@@ -580,44 +582,62 @@ def valid_step(
   return results
 
 
-def augment_cutmix_batch(images, labels, masks, lgs_seg, lgs_sal, beta=1.):
-  # images = images.numpy()
-  # labels = labels.numpy()
-  # masks = masks.numpy()
-  # lgs_seg = lgs_seg.numpy()
-  # lgs_sal = lgs_sal.numpy()
+def apply_aug(images, labels, masks, lgs_seg, lgs_sal, beta=1., mix="classmix", ignore_class=None):
+  images_mix = images.detach().clone()
+  labels_mix = labels.detach().clone()
+  masks_mix = masks.detach().clone()
+  lgs_seg_mix = lgs_seg.detach().clone()
+  lgs_sal_mix = lgs_sal.detach().clone()
 
   ids = np.arange(len(images), dtype="int")
   bids = np.asarray([np.random.choice(ids[ids != i]) for i in ids])
 
-  images_mix = images.clone()
-  labels_mix = labels.clone()
-  masks_mix = masks.clone()
-  lgs_seg_mix = lgs_seg.clone()
-  lgs_sal_mix = lgs_sal.clone()
 
   for idx_a, idx_b in zip(ids, bids):
-    alpha = np.random.beta(beta, beta)
-    bmask_a = np.zeros_like(masks[idx_a])
-    bmask_a[masks[idx_a] == 255] = 255
-    bmask_b = np.ones_like(masks[idx_b])
-    bmask_b[masks[idx_b] == 255] = 255
+    if mix == "cutmix":
+      mix_mask = generate_cutout_mask(masks[idx_b])
+      alpha = mix_mask.float().mean()
+      labels_mix = alpha * labels[idx_a] + (1-alpha) * labels[idx_b]
+    else:
+      mix_mask, new_labels = generate_class_mask(masks[idx_b], ignore_class)
+      labels_mix[idx_a][new_labels] = 1.
 
-    _, _, _, b_mask = augment_utils._cutmix(
-      (idx_a, images_mix[idx_a], labels_mix[idx_a], bmask_a),
-      (idx_b, images[idx_b], labels[idx_b], bmask_b),
-      alpha=alpha
-    )
+    mix_mask = (mix_mask == 1) & (masks[idx_b] != 255)
 
-    b_mask = b_mask == 1
-    mask_seg = b_mask.expand(lgs_seg[idx_b].shape)
-    mask_sal = b_mask.expand(lgs_sal[idx_b].shape)
+    images_mix[idx_a][:, mix_mask] = images[idx_b][:, mix_mask]
+    masks_mix[idx_a][mix_mask] = masks[idx_b][mix_mask]
+    lgs_seg_mix[idx_a][:, mix_mask] = lgs_seg[idx_b][:, mix_mask]
+    lgs_sal_mix[idx_a][:, mix_mask] = lgs_sal[idx_b][:, mix_mask]
 
-    masks_mix[idx_a][b_mask] = masks[idx_b][b_mask]
-    lgs_seg_mix[idx_a][mask_seg] = lgs_seg[idx_b][mask_seg]
-    lgs_sal_mix[idx_a][mask_sal] = lgs_sal[idx_b][mask_sal]
+  return images_mix, labels_mix, masks_mix, lgs_seg_mix, lgs_sal_mix
 
-  return images_mix, labels_mix, masks, lgs_seg, lgs_sal
+
+def generate_cutout_mask(pseudo_labels, ratio=2):
+    img_size = pseudo_labels.shape
+    cutout_area = img_size[0] * img_size[1] / ratio
+
+    w = np.random.randint(img_size[1] / ratio + 1, img_size[1])
+    h = np.round(cutout_area / w)
+
+    x_start = np.random.randint(0, img_size[1] - w + 1)
+    y_start = np.random.randint(0, img_size[0] - h + 1)
+
+    x_end = int(x_start + w)
+    y_end = int(y_start + h)
+
+    mask = torch.zeros(img_size, dtype=torch.int32)
+    mask[y_start:y_end, x_start:x_end] = 1
+    return mask
+
+
+def generate_class_mask(pseudo_labels, ignore_class=None):
+    labels = torch.unique(pseudo_labels)
+    labels = labels[labels != 255]
+    if ignore_class is not None:
+      labels = labels[labels != ignore_class]
+    labels_select = labels[torch.randperm(len(labels))][:max(len(labels) // 2, 1)]
+    mask = (pseudo_labels.unsqueeze(-1) == labels_select).any(-1)
+    return mask.float(), labels_select
 
 
 def get_pseudo_label(images, targets, cams, masks_bg, thresholds, resize_align_corners=None, mode="cam", c2s_sigma=0.5, clf_t=0.5):
