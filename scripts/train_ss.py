@@ -543,9 +543,10 @@ def train_step(
   if not w_u or pixels_unreliable.sum() == 0:
     loss_u = torch.zeros(()).to(loss_c)
   else:
+    rep_all = outputs["rep"]
+    pred_all = outputs["masks_seg"]
+
     with torch.no_grad():
-      rep_all = outputs["rep"]
-      pred_all = outputs["masks_seg"]
       prob_all = torch.softmax(pred_all, dim=1)
 
       valid_mask = (~pixels_unreliable).float()
