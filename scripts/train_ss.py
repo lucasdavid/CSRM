@@ -145,9 +145,10 @@ class SegmentationAugmentedDataset(datasets.SegmentationDataset):
     # strong aug
     image_s1 = Image.fromarray(image.astype("uint8"))
     if random.random() < 0.8:
-        image_s1 = self._colorjitter(image_s1)
+      image_s1 = self._colorjitter(image_s1)
     image_s1 = self._grayscale(image_s1)
     image_s1 = self._blur(image_s1, p=0.5)
+    image_s1 = np.array(image_s1, dtype=np.float32)
 
     data = self.tensor_transform({"image": image, "mask": mask})
     image, mask = data["image"], data["mask"]
@@ -431,47 +432,52 @@ def train_step(
 ):
   criterion_c, criterion_c2s, criterion_s2c = criterions
 
-  with torch.no_grad():
-    teacher_outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
-    features_cls_t = teacher_outputs["features_c"].cpu()
-    logit_seg_large_t = teacher_outputs["masks_seg_large"].cpu()
-    if model.use_sal_head:
-      logit_sal_t = teacher_outputs["masks_sal_large"].cpu()
-    else:
-      logit_sal_t = logit_seg_large_t[:, bg_class].cpu().unsqueeze(1)
+  teacher_outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
+  features_cls_t = teacher_outputs["features_c"].detach()
+  logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
+  if model.use_sal_head:
+    logit_sal_t = teacher_outputs["masks_sal_large"].detach()
+  else:
+    logit_sal_t = logit_seg_large_t[:, bg_class:bg_class + 1].detach()
+  del teacher_outputs
 
-    if c2s_mode == "gt":  # only a sanity test.
-      pseudo_masks = true_masks
-    else:
-      pseudo_masks = get_pseudo_label(
-        images,
-        true_labels,
-        features_cls_t,
-        masks_bg=None, # probs_seg_large[:, bg_class],
-        thresholds=thresholds,
-        resize_align_corners=True,
-        mode=c2s_mode,
-        c2s_sigma=c2s_sigma,
-      )
+  if c2s_mode == "gt":  # only a sanity test.
+    pseudo_masks = true_masks
+  else:
+    pseudo_masks = get_pseudo_label(
+      images,
+      true_labels,
+      cams=features_cls_t,
+      masks_bg=None,  # probs_seg_large[:, bg_class],
+      thresholds=thresholds,
+      resize_align_corners=True,
+      mode=c2s_mode,
+      c2s_sigma=c2s_sigma,
+    )
 
-    if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
-      mix = "cutmix" if "cutmix" in augment else "classmix"
-      (
-        images_aug,
-        true_labels,
-        pseudo_masks,
-        logit_seg_large_t,
-        logit_sal_t,
-      ) = apply_aug(
-        images_aug, true_labels, pseudo_masks, logit_seg_large_t, logit_sal_t,
-        beta=1.0, mix=mix, ignore_class=bg_class,
-      )
+  if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
+    mix = "cutmix" if "cutmix" in augment else "classmix"
+    (
+      images_aug,
+      true_labels,
+      pseudo_masks,
+      logit_seg_large_t,
+      logit_sal_t,
+    ) = apply_aug(
+      images_aug, true_labels, pseudo_masks, logit_seg_large_t.cpu(), logit_sal_t.cpu(),
+      beta=1.0, mix=mix, ignore_class=bg_class,
+    )
 
     logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
     logit_sal_t = logit_sal_t.float().to(DEVICE)
 
   # Forward
   outputs = model(images_aug.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
+  logit_seg_large = outputs["masks_seg_large"]
+  if model.use_sal_head:
+    logit_sal = outputs["masks_sal_large"]
+  else:
+    logit_sal = logit_seg_large[:, bg_class].unsqueeze(1)
 
   # (1) Classification loss.
   loss_c = criterion_c(outputs["logits_c"], label_smoothing(true_labels, ls).to(DEVICE))
@@ -496,8 +502,8 @@ def train_step(
   if not w_s2c:
     loss_s2c = torch.zeros(()).to(loss_c)
   elif s2c_mode == "bce":
-    probs_seg_large_teacher = torch.softmax(logit_seg_large_t, dim=1)
-    prob_bg = 1 - probs_seg_large_teacher[:, bg_class].unsqueeze(1)
+    probs_seg_large = torch.softmax(logit_seg_large, dim=1)
+    prob_bg = 1 - probs_seg_large[:, bg_class].unsqueeze(1)
     loss_s2c = criterion_s2c(outputs["masks_sal_large"], prob_bg)
     # conf_pixels_s2c = (prob_bg - 0.5).abs() >= s2c_sigma  # conf >= 0.9
     conf_pixels_s2c = (prob_bg < (1 - s2c_sigma)) | (prob_bg >= s2c_sigma)
@@ -507,8 +513,8 @@ def train_step(
     conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
   else:
-    feats_c = resize_tensor(outputs["features_c"], logit_sal_t.shape[2:], "bilinear", align_corners=True)
-    masks_c = torch.concat((logit_sal_t.to(feats_c), feats_c), dim=1)  # B(C+1)HW
+    feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
+    masks_c = torch.concat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
     conf_pixels_s2c += 1.0
 
     if s2c_mode == "kld":
@@ -517,15 +523,15 @@ def train_step(
 
       loss_s2c = (T ** 2) * criterion_s2c(
         torch.log_softmax(masks_c / T, dim=1),
-        torch.softmax(logit_seg_large_t / T, dim=1)
+        torch.softmax(logit_seg_large / T, dim=1)
       )
 
     if s2c_mode == "mp":
       # Branches Mutual Promotion
       # https://arxiv.org/pdf/2308.04949.pdf
 
-      probs_seg_large_teacher = torch.softmax(logit_seg_large_t, dim=1)
-      conf_pixels_s2c, pmasks_sal = probs_seg_large_teacher.max(1)
+      probs_seg_large = torch.softmax(logit_seg_large, dim=1)
+      conf_pixels_s2c, pmasks_sal = probs_seg_large.max(1)
 
       conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
       pmasks_sal[~conf_pixels_s2c] = 255
@@ -546,7 +552,7 @@ def train_step(
       valid_mask = F.interpolate(valid_mask[:, None, ...], size=pred_all.shape[2:], mode='nearest')
 
       label_all = torch.where(pixels_unreliable, 0, pseudo_masks)
-      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large_t.shape[1]), size=pred_all.shape[2:], mode="nearest")
+      label_all = F.interpolate(reco.label_onehot(label_all, num_segments=logit_seg_large.shape[1]), size=pred_all.shape[2:], mode="nearest")
 
     loss_u = reco.compute_reco_loss(rep_all, prob_all, label_all, valid_mask,
                                     args.reco_strong_threshold, args.reco_temp,
@@ -651,16 +657,6 @@ def valid_step(
   results.update({f"segmentation/{k}": v for k, v in results_seg.items()})
   results.update({f"classification/{k}": v for k, v in results_clf.items()})
   return results
-
-
-def generate_class_mask(pseudo_labels, ignore_class=None):
-    labels = torch.unique(pseudo_labels)
-    labels = labels[labels != 255]
-    if ignore_class is not None:
-      labels = labels[labels != ignore_class]
-    labels_select = labels[torch.randperm(len(labels))][:max(len(labels) // 2, 1)]
-    mask = (pseudo_labels.unsqueeze(-1) == labels_select).any(-1)
-    return mask.float(), labels_select
 
 
 def get_pseudo_label(images, targets, cams, masks_bg, thresholds, resize_align_corners=None, mode="cam", c2s_sigma=0.5, clf_t=0.5):
@@ -794,6 +790,16 @@ def generate_cutout_mask(pseudo_labels, ratio=2):
     mask = torch.zeros(img_size, dtype=torch.int32)
     mask[y_start:y_end, x_start:x_end] = 1
     return mask
+
+
+def generate_class_mask(pseudo_labels, ignore_class=None):
+    labels = torch.unique(pseudo_labels)
+    labels = labels[labels != 255]
+    if ignore_class is not None:
+      labels = labels[labels != ignore_class]
+    labels_select = labels[torch.randperm(len(labels))][:max(len(labels) // 2, 1)]
+    mask = (pseudo_labels.unsqueeze(-1) == labels_select).any(-1)
+    return mask.float(), labels_select
 
 # endregion
 
