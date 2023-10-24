@@ -1,6 +1,76 @@
+import random
+
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.utils.data.sampler as sampler
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as transforms_f
+from PIL import Image, ImageFilter
+
+
+def transform(image, label, logits=None, crop_size=(512, 512), scale_size=(0.8, 1.0), augmentation=True):
+    # Random rescale image
+    raw_w, raw_h = image.size
+    scale_ratio = random.uniform(scale_size[0], scale_size[1])
+
+    resized_size = (int(raw_h * scale_ratio), int(raw_w * scale_ratio))
+    image = transforms_f.resize(image, resized_size, Image.BILINEAR)
+    label = transforms_f.resize(label, resized_size, Image.NEAREST)
+    if logits is not None:
+        logits = transforms_f.resize(logits, resized_size, Image.NEAREST)
+
+    # Add padding if rescaled image size is less than crop size
+    if crop_size == -1:  # use original im size without crop or padding
+        crop_size = (raw_h, raw_w)
+
+    if crop_size[0] > resized_size[0] or crop_size[1] > resized_size[1]:
+        right_pad, bottom_pad = max(crop_size[1] - resized_size[1], 0), max(crop_size[0] - resized_size[0], 0)
+        image = transforms_f.pad(image, padding=(0, 0, right_pad, bottom_pad), padding_mode='reflect')
+        label = transforms_f.pad(label, padding=(0, 0, right_pad, bottom_pad), fill=255, padding_mode='constant')
+        if logits is not None:
+            logits = transforms_f.pad(logits, padding=(0, 0, right_pad, bottom_pad), fill=0, padding_mode='constant')
+
+    # Random Cropping
+    i, j, h, w = transforms.RandomCrop.get_params(image, output_size=crop_size)
+    image = transforms_f.crop(image, i, j, h, w)
+    label = transforms_f.crop(label, i, j, h, w)
+    if logits is not None:
+        logits = transforms_f.crop(logits, i, j, h, w)
+
+    if augmentation:
+        # Random color jitter
+        if torch.rand(1) > 0.2:
+            #  color_transform = transforms.ColorJitter((0.75, 1.25), (0.75, 1.25), (0.75, 1.25), (-0.25, 0.25))  For PyTorch 1.9/TorchVision 0.10 users
+            color_transform = transforms.ColorJitter.get_params((0.75, 1.25), (0.75, 1.25), (0.75, 1.25), (-0.25, 0.25))
+            image = color_transform(image)
+
+        # Random Gaussian filter
+        if torch.rand(1) > 0.5:
+            sigma = random.uniform(0.15, 1.15)
+            image = image.filter(ImageFilter.GaussianBlur(radius=sigma))
+
+        # Random horizontal flipping
+        if torch.rand(1) > 0.5:
+            image = transforms_f.hflip(image)
+            label = transforms_f.hflip(label)
+            if logits is not None:
+                logits = transforms_f.hflip(logits)
+
+    # Transform to tensor
+    image = transforms_f.to_tensor(image)
+    label = (transforms_f.to_tensor(label) * 255).long()
+    # label[label == 255] = -1  # invalid pixels are re-mapped to index -1
+    if logits is not None:
+        logits = transforms_f.to_tensor(logits)
+
+    # Apply (ImageNet) normalisation
+    image = transforms_f.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    if logits is not None:
+        return image, label, logits
+    else:
+        return image, label
+
 
 
 # --------------------------------------------------------------------------------

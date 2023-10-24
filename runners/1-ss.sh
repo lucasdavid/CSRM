@@ -184,10 +184,10 @@ TRAINABLE_BONE=false
 ARCHITECTURE=resnest101
 ARCH=rs101
 
-EPOCHS=60
+EPOCHS=30
 MAX_STEPS=145  # 1464 (voc12 train samples) // 16 = 91 steps.
-BATCH_SIZE=16
-ACCUMULATE_STEPS=1
+BATCH_SIZE=10
+ACCUMULATE_STEPS=2
 LABELSMOOTHING=0
 AUGMENT=none  # none for DeepGlobe
 
@@ -204,14 +204,13 @@ EID=r1  # Experiment ID
 # RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
 # RESTORE=experiments/models/puzzle/ResNeSt50@Puzzle@optimal.pth
 RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-# RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
 # RESTORE=experiments/models/vanilla/voc12-rn101-lr0.1-rals-r1.pth
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-lsra-r4.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rs50fe-rals-ce-lr0.01-cwnone-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
 
-TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-$EID
+TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-aug-$EID
 train_ss
 
 # # DOMAIN=$DOMAIN_TRAIN inference_priors

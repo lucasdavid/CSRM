@@ -4,7 +4,7 @@ import os
 import time
 from functools import partial
 from multiprocessing import Pool
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import sklearn.metrics as skmetrics
@@ -118,79 +118,42 @@ def to_2d(x):
   return x[..., None, None]
 
 
-class SegmentationAugmentedDataset(datasets.SegmentationDataset):
+class RecoAugSegmentationDataset(datasets.SegmentationDataset):
 
   def __init__(
-    self,
-    data_source: datasets.CustomDataSource,
-    image_transform: transforms.Compose = None,
-    tensor_transform: transforms.Compose = None,
-    ignore_bg_images: bool = None,
-    task: Optional[str] = None,
+      self,
+      data_source: datasets.CustomDataSource,
+      crop_size: Tuple[int, int] = (512, 512),
+      scale_size: Tuple[float, float] = (1.0, 1.0),
+      augmentation=False,
+      **kwargs
   ):
-    super().__init__(data_source=data_source, ignore_bg_images=ignore_bg_images, task=task)
-
-    self.image_transform = image_transform
-    self.tensor_transform = tensor_transform
+    super().__init__(data_source, **kwargs)
+    self.crop_size = crop_size
+    self.scale_size = scale_size
+    self.augmentation = augmentation
 
   def __getitem__(self, index):
     sample_id, label = self.get_valid_sample(index)
-
     image = self.data_source.get_image(sample_id)
     mask = self.data_source.get_mask(sample_id)
-
-    data = self.image_transform({"image": image, "mask": mask})
-    image, mask = data["image"], data["mask"]
-
-    # strong aug
-    image_s1 = Image.fromarray(image.astype("uint8"))
-    if random.random() < 0.8:
-      image_s1 = self._colorjitter(image_s1)
-    image_s1 = self._grayscale(image_s1)
-    image_s1 = self._blur(image_s1, p=0.5)
-    image_s1 = np.array(image_s1, dtype=np.float32)
-
-    data = self.tensor_transform({"image": image, "mask": mask})
-    image, mask = data["image"], data["mask"]
-
-    data = self.tensor_transform({"image": image_s1, "mask": mask})
-    image_s1 = data["image"]
-
-    return sample_id, image, image_s1, label, mask
-
-  _colorjitter = transforms.ColorJitter(0.5, 0.5, 0.5, 0.25)
-  _grayscale = transforms.RandomGrayscale(p=0.2)
-
-  def _blur(self, img, p=0.5):
-    if random.random() < p:
-        sigma = np.random.uniform(0.1, 2.0)
-        img = img.filter(ImageFilter.GaussianBlur(radius=sigma))
-    return img
+    image, mask = reco.transform(
+      image, mask,
+      crop_size=self.crop_size,
+      scale_size=self.scale_size,
+      augmentation=self.augmentation,
+    )
+    return sample_id, image, label, mask[0]
 
 
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  _, tv = datasets.get_segmentation_transforms(args.min_image_size, args.max_image_size, args.image_size, augment="none")
-  tt = transforms.Compose([
-    RandomResize_For_Segmentation(args.min_image_size, args.max_image_size, overcrop=True),
-    RandomHorizontalFlip_For_Segmentation(),
-    RandomCrop_For_Segmentation(args.image_size, bg_value=127.5),
-  ])
-
-  train_dataset = SegmentationAugmentedDataset(
-    ts,
-    image_transform=tt,
-    tensor_transform=transforms.Compose([
-      Normalize_For_Segmentation(*datasets.imagenet_stats()),
-      Transpose_For_Segmentation(),
-    ])
-  )
-  valid_dataset = datasets.SegmentationDataset(vs, transform=tv)
-
+  train_dataset = RecoAugSegmentationDataset(ts, crop_size=(args.image_size,)*2, scale_size=(0.5, 1.5), augmentation=False)
+  valid_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,)*2, augmentation=False)
   train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
-  log_dataset(args.dataset, train_dataset, tt, tv)
+  log_dataset(args.dataset, train_dataset, reco.transform, reco.transform)
 
   step_val = args.max_steps or len(train_loader)
   step_log = max(int(step_val * args.print_ratio), 1)
@@ -273,7 +236,7 @@ def train_singlestage(args, wb_run, model_path):
 
     for epoch in range(args.first_epoch, args.max_epoch):
       for step, batch in enumerate(tqdm_custom(train_loader, desc=f"Epoch {epoch}")):
-        _, images, images_aug, true_labels, true_masks = batch
+        _, images, true_labels, true_masks = batch
 
         s2c_mode = args.s2c_mode
         c2s_mode = args.c2s_mode
@@ -312,7 +275,6 @@ def train_singlestage(args, wb_run, model_path):
           loss, metrics = train_step(
             model,
             images,
-            images_aug,
             true_labels,
             true_masks,
             criterions,
@@ -412,7 +374,6 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
 def train_step(
   model: SingleStageModel,
   images,
-  images_aug,
   true_labels,
   true_masks,
   criterions,
@@ -458,13 +419,13 @@ def train_step(
   if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
     mix = "cutmix" if "cutmix" in augment else "classmix"
     (
-      images_aug,
+      images,
       true_labels,
       pseudo_masks,
       logit_seg_large_t,
       logit_sal_t,
     ) = apply_aug(
-      images_aug, true_labels, pseudo_masks, logit_seg_large_t.cpu(), logit_sal_t.cpu(),
+      images, true_labels, pseudo_masks, logit_seg_large_t.cpu(), logit_sal_t.cpu(),
       beta=1.0, mix=mix, ignore_class=bg_class,
     )
 
@@ -472,7 +433,7 @@ def train_step(
     logit_sal_t = logit_sal_t.float().to(DEVICE)
 
   # Forward
-  outputs = model(images_aug.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
+  outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
   logit_seg_large = outputs["masks_seg_large"]
   if model.use_sal_head:
     logit_sal = outputs["masks_sal_large"]
