@@ -11,9 +11,7 @@ import sklearn.metrics as skmetrics
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
-from PIL import Image, ImageOps, ImageFilter
 
 import datasets
 import wandb
@@ -149,13 +147,15 @@ class RecoAugSegmentationDataset(datasets.SegmentationDataset):
 def train_singlestage(args, wb_run, model_path):
   ts = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  train_dataset = RecoAugSegmentationDataset(ts, crop_size=(args.image_size,)*2, scale_size=(0.5, 1.5), augmentation=False)
+  train_l_dataset = RecoAugSegmentationDataset(ts, crop_size=(args.image_size,)*2, scale_size=(0.5, 1.5), augmentation=True)
+  # train_u_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,)*2, augmentation=False)
   valid_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,)*2, augmentation=False)
-  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
+  train_l_loader = DataLoader(train_l_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
+  # train_u_loader = DataLoader(train_u_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
-  log_dataset(args.dataset, train_dataset, reco.transform, reco.transform)
+  log_dataset(args.dataset, train_l_dataset, reco.transform, reco.transform)
 
-  step_val = args.max_steps or len(train_loader)
+  step_val = args.max_steps or len(train_l_loader)
   step_log = max(int(step_val * args.print_ratio), 1)
   step_init = args.first_epoch * step_val
   step_max = args.max_epoch * step_val
@@ -235,7 +235,7 @@ def train_singlestage(args, wb_run, model_path):
       miou_best, _ = valid_loop(model, valid_loader, ts, 0, optimizer, miou_best=0)
 
     for epoch in range(args.first_epoch, args.max_epoch):
-      for step, batch in enumerate(tqdm_custom(train_loader, desc=f"Epoch {epoch}")):
+      for step, batch in enumerate(tqdm_custom(train_l_loader, desc=f"Epoch {epoch}")):
         _, images, true_labels, true_masks = batch
 
         s2c_mode = args.s2c_mode
@@ -291,6 +291,7 @@ def train_singlestage(args, wb_run, model_path):
             bg_class=ts.segmentation_info.bg_class,
             augment=args.augment,
             cutmix_prob=args.cutmix_prob,
+            use_sal_head=args.use_sal_head,
           )
 
         scaler.scale(loss / args.accumulate_steps).backward()
@@ -390,13 +391,14 @@ def train_step(
   bg_class: int,
   augment: str = "none",
   cutmix_prob: float = 0.5,
+  use_sal_head: bool = False,
 ):
   criterion_c, criterion_c2s, criterion_s2c = criterions
 
   teacher_outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
   features_cls_t = teacher_outputs["features_c"].detach()
   logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
-  if model.use_sal_head:
+  if use_sal_head:
     logit_sal_t = teacher_outputs["masks_sal_large"].detach()
   else:
     logit_sal_t = logit_seg_large_t[:, bg_class:bg_class + 1].detach()
@@ -435,7 +437,7 @@ def train_step(
   # Forward
   outputs = model(images.to(DEVICE), with_saliency=True, with_mask=True, with_rep=True)
   logit_seg_large = outputs["masks_seg_large"]
-  if model.use_sal_head:
+  if use_sal_head:
     logit_sal = outputs["masks_sal_large"]
   else:
     logit_sal = logit_seg_large[:, bg_class].unsqueeze(1)

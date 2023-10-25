@@ -3,8 +3,13 @@
 #SBATCH --ntasks-per-node=48
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
-#SBATCH -o /scratch/lerdl/lucas.david/logs/%j-ss.out
+#SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
 #SBATCH --time=24:00:00
+
+##SBATCH -p sequana_gpu_shared
+##SBATCH --ntasks-per-node=48
+##SBATCH -p nvidia_long
+##SBATCH --ntasks-per-node=24
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -32,6 +37,9 @@ else
   WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
 fi
 
+echo "Env:      $ENV"
+echo "Work Dir: $WORK_DIR"
+
 # Dataset
 DATASET=voc12  # Pascal VOC 2012
 # DATASET=coco14  # MS COCO 2014
@@ -42,6 +50,8 @@ DATASET=voc12  # Pascal VOC 2012
 
 cd $WORK_DIR
 export PYTHONPATH=$(pwd)
+
+# $PIP install --user -r requirements.txt
 
 ## Architecture
 ### Priors
@@ -177,17 +187,18 @@ evaluate_priors() {
     --num_workers $WORKERS_INFER;
 }
 
+
 LR=0.007  # voc12
 MODE=fix
 TRAINABLE_STEM=false
-TRAINABLE_BONE=false
+TRAINABLE_BONE=true
 ARCHITECTURE=resnest101
 ARCH=rs101
 
 EPOCHS=30
 MAX_STEPS=145  # 1464 (voc12 train samples) // 16 = 91 steps.
-BATCH_SIZE=10
-ACCUMULATE_STEPS=2
+BATCH_SIZE=20
+ACCUMULATE_STEPS=1
 LABELSMOOTHING=0
 AUGMENT=none  # none for DeepGlobe
 
