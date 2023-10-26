@@ -411,7 +411,7 @@ def train_step(
       images,
       true_labels,
       cams=features_cls_t,
-      masks_bg=None,  # probs_seg_large[:, bg_class],
+      masks_bg=logit_seg_large_t[:, bg_class],
       thresholds=thresholds,
       resize_align_corners=True,
       mode=c2s_mode,
