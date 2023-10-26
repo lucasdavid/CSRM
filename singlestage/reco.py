@@ -46,9 +46,9 @@ def transform(image, label, logits=None, crop_size=(512, 512), scale_size=(0.8, 
             image = color_transform(image)
 
         # Random Gaussian filter
-        # if torch.rand(1) > 0.5:
-        #     sigma = random.uniform(0.15, 1.15)
-        #     image = image.filter(ImageFilter.GaussianBlur(radius=sigma))
+        if torch.rand(1) > 0.5:
+            sigma = random.uniform(0.15, 1.15)
+            image = image.filter(ImageFilter.GaussianBlur(radius=sigma))
 
         # Random horizontal flipping
         if torch.rand(1) > 0.5:
