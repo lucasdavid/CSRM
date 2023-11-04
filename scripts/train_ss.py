@@ -40,6 +40,7 @@ parser.add_argument('--dataset', default='voc12', choices=datasets.DATASOURCES)
 parser.add_argument('--data_dir', required=True, type=str)
 parser.add_argument('--domain_train', default=None, type=str)
 parser.add_argument('--domain_valid', default=None, type=str)
+parser.add_argument('--sampler', default="balanced", type=str, choices=["default", "balanced"])
 
 # Network
 parser.add_argument('--architecture', default='resnet50', type=str)
@@ -150,7 +151,19 @@ def train_singlestage(args, wb_run, model_path):
   train_l_dataset = RecoAugSegmentationDataset(ts, crop_size=(args.image_size,)*2, scale_size=(0.5, 1.5), augmentation=True)
   # train_u_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,)*2, augmentation=False)
   valid_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,)*2, augmentation=False)
-  train_l_loader = DataLoader(train_l_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
+
+  if args.sampler == "default":
+    sampler = None
+  else:
+    from sklearn.utils import compute_sample_weight
+    from torch.utils.data import WeightedRandomSampler
+    labels = np.asarray([ts.get_label(_id) for _id in ts.sample_ids])
+    weights = compute_sample_weight("balanced", labels)
+    generator = torch.Generator()
+    generator.manual_seed(args.seed + 153)
+    sampler = WeightedRandomSampler(weights, len(train_l_dataset), replacement=True, generator=generator)
+
+  train_l_loader = DataLoader(train_l_dataset, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, drop_last=True, pin_memory=True)
   # train_u_loader = DataLoader(train_u_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
   valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
   log_dataset(args.dataset, train_l_dataset, reco.transform, reco.transform)
