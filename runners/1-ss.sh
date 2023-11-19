@@ -61,6 +61,7 @@ TRAINABLE_STEM=true
 TRAINABLE_BONE=true
 DILATED=false
 USE_SAL_HEAD=false
+USE_REP_HEAD=true
 MODE=normal
 REGULAR=none
 
@@ -97,7 +98,7 @@ CRF_T=0
 CRF_GT=0.7
 
 
-train_ss() {
+train_single_stage() {
   echo "=================================================================="
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
@@ -105,7 +106,7 @@ train_ss() {
   WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,s2c:$S2C_MODE,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-ss" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/train_ss.py \
+    $PY scripts/ss/train.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
@@ -124,6 +125,7 @@ train_ss() {
     --mixed_precision $MIXED_PRECISION \
     --architecture $ARCHITECTURE \
     --use_sal_head $USE_SAL_HEAD \
+    --use_rep_head $USE_REP_HEAD \
     --dilated $DILATED \
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
@@ -152,30 +154,35 @@ train_ss() {
     --restore $RESTORE;
 }
 
-inference_priors() {
+inference_single_stage() {
   echo "=================================================================="
   echo "[Inference:$TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
   CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/cam/inference.py \
+    $PY scripts/ss/inference.py \
     --architecture $ARCHITECTURE \
     --regularization $REGULAR \
     --dilated $DILATED \
+    --use_sal_head $USE_SAL_HEAD \
+    --use_rep_head $USE_REP_HEAD \
     --trainable-stem $TRAINABLE_STEM \
     --mode $MODE \
     --tag $TAG \
+    --weights $WEIGHTS \
     --dataset $DATASET \
     --domain $DOMAIN \
     --data_dir $DATA_DIR \
     --device $DEVICE
 }
 
-evaluate_priors() {
+evaluate_single_stage() {
+  # PRED_DIR=$PROOT/$TAG/$PKIN
   WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
     --experiment_name $TAG \
+    --pred_dir $PRED_DIR \
     --dataset $DATASET \
     --domain $DOMAIN \
     --data_dir $DATA_DIR \
@@ -183,7 +190,7 @@ evaluate_priors() {
     --max_th $MAX_TH \
     --crf_t $CRF_T \
     --crf_gt_prob $CRF_GT \
-    --mode npy \
+    --mode $EVAL_MODE \
     --num_workers $WORKERS_INFER;
 }
 
@@ -192,8 +199,8 @@ LR=0.007
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=false
-ARCHITECTURE=resnest101
-ARCH=rs101
+ARCHITECTURE=resnest269
+ARCH=rs269
 
 EPOCHS=30
 MAX_STEPS=74  # 1464 (voc12 train samples) // 16 = 91 steps.
@@ -222,13 +229,36 @@ RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
 
-TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-wsss-w_s2c0.1-$AUGMENT-ls-$EID
-train_ss
+# TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-wsss-w_s2c0.1-$AUGMENT-ls-$EID
+# WEIGHTS=experiments/models/$TAG-best.pth
+#
+ARCHITECTURE=resnest269
+ARCH=rs269
+EID=r3
 
-# # DOMAIN=$DOMAIN_TRAIN inference_priors
-# DOMAIN=$DOMAIN_VALID inference_priors
-# # DOMAIN=$DOMAIN_VALID_SEG inference_priors
+# TAG=ss/voc12-rs269-lr0.007-reco-wsss-w_s2c0.1-cutmix-ls-r1
+# TAG=ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r1
+# WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r1-best.pth
+TAG=ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3
+WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3-best.pth
+# train_single_stage
 
-# DOMAIN=$DOMAIN_VALID     TAG=$TAG@train@scale=0.5,1.0,1.5,2.0 evaluate_priors
-# DOMAIN=$DOMAIN_VALID     TAG=$TAG@train@scale=0.5,1.0,1.5,2.0 CRF_T=10 evaluate_priors
-# # DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val@scale=0.5,1.0,1.5,2.0   evaluate_priors
+# DOMAIN=$DOMAIN_TRAIN inference_single_stage
+# DOMAIN=$DOMAIN_VALID inference_single_stage
+# DOMAIN=$DOMAIN_VALID_SEG inference_single_stage
+TAG="RS269-PNOC-r3"
+PRED_DIR=./experiments/predictions/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3@val/cams
+
+PROOT=experiments/predictions
+EVAL_MODE=npy              # used with predictions in $TAG@train/cams
+PKIN=cams
+# EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
+# PKIN=segs
+
+# DOMAIN=train TAG=$TAG@train evaluate_single_stage
+DOMAIN=val   TAG=$TAG@val   evaluate_single_stage
+
+MIN_TH=0.15
+MAX_TH=0.41
+# DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_single_stage
+DOMAIN=val   TAG=$TAG@val   CRF_T=10 evaluate_single_stage
