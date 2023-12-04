@@ -4,6 +4,18 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 
+def label_onehot(inputs, num_segments):
+    batch_size, im_h, im_w = inputs.shape
+    outputs = torch.zeros((num_segments, batch_size, im_h, im_w)).cuda()
+
+    inputs_temp = inputs.clone()
+    inputs_temp[inputs == 255] = 0
+    outputs.scatter_(0, inputs_temp.unsqueeze(1), 1.0)
+    outputs[:, inputs == 255] = 0
+
+    return outputs.permute(1, 0, 2, 3)
+
+
 def get_world_size():
   if not dist.is_available():
     return 1
@@ -54,8 +66,9 @@ def synchronize():
 def dequeue_and_enqueue(keys, queue, queue_ptr, queue_size):
   # gather keys before updating queue
   keys = keys.detach().clone().cpu()
-  gathered_list = gather_together(keys)
-  keys = torch.cat(gathered_list, dim=0).cuda()
+  # TODO: restore this when dist.
+  # gathered_list = gather_together(keys)
+  # keys = torch.cat(gathered_list, dim=0).cuda()
 
   batch_size = keys.shape[0]
 

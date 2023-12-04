@@ -90,7 +90,7 @@ parser.add_argument('--mixup_prob', default=0.5, type=float)
 parser.add_argument('--c2s_mode', default="cam", choices=["cam", "mp", "gt"])
 parser.add_argument('--c2s_sigma', default=0.5, type=float)
 parser.add_argument('--s2c_sigma', default=0.5, type=float)
-parser.add_argument('--warmup_epochs', default=3, type=int)
+parser.add_argument('--warmup_epochs', default=1, type=int)
 
 # RECO
 parser.add_argument('--reco_strong_threshold', default=0.97, type=float)
@@ -109,10 +109,6 @@ except KeyError:
 GPUS = GPUS.split(",")
 GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
-
-
-def to_2d(x):
-  return x[..., None, None]
 
 
 class RecoAugSegmentationDataset(datasets.SegmentationDataset):
@@ -167,9 +163,7 @@ def train_u2pl(args, wb_run, model_path):
 
   train_l_loader = DataLoader(train_l_dataset, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=True)
   train_u_loader = DataLoader(train_u_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
-  valid_loader = DataLoader(
-    valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True
-  )
+  valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
   log_dataset(args.dataset, train_l_dataset, reco.transform, reco.transform)
 
   step_val = args.max_steps or len(train_l_loader)
@@ -238,7 +232,8 @@ def train_u2pl(args, wb_run, model_path):
   queue_size[0] = 50000
 
   # build prototype
-  prototype = torch.zeros((num_classes_segm, args.reco_num_queries, 1, 256)).to(DEVICE)
+  # prototype = torch.zeros((num_classes_segm, args.reco_num_queries, 1, 256)).to(DEVICE)
+  prototype = None
 
   memory = (memobank, queue_size, queue_ptrlis, prototype)
 
@@ -266,7 +261,7 @@ def train_u2pl(args, wb_run, model_path):
 
   try:
     if args.first_epoch == 0:
-      # Check the initial mIoU from prior CAM generating model.
+      print("Checking the initial mIoU from pretrained CAM generating model...")
       miou_best, _ = valid_loop(model, valid_loader, tls, 0, optimizer, miou_best=0)
 
     for epoch in range(args.first_epoch, args.max_epoch):
@@ -322,6 +317,7 @@ def train_u2pl(args, wb_run, model_path):
             c2s_mode=c2s_mode,
             s2c_sigma=s2c_sigma,
             c2s_sigma=c2s_sigma,
+            num_classes=num_classes_segm,
             bg_class=tls.segmentation_info.bg_class,
             augment=args.augment,
             cutmix_prob=args.cutmix_prob,
@@ -404,9 +400,7 @@ def train_u2pl(args, wb_run, model_path):
 def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True):
   model.eval()
   with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-    metric_results = valid_step(
-      model, valid_loader, ts, THRESHOLDS, DEVICE, log_samples=True, max_steps=args.validate_max_steps
-    )
+    metric_results = valid_step(model, valid_loader, ts, THRESHOLDS, DEVICE, log_samples=True, max_steps=args.validate_max_steps)
     metric_results.update({"step": optimizer.global_step, "epoch": epoch})
   model.train()
 
@@ -443,12 +437,14 @@ def train_step(
   s2c_sigma: float,
   c2s_sigma: float,
   c2s_mode: str,
+  num_classes: int,
   bg_class: int,
   augment: str = "none",
   cutmix_prob: float = 0.5,
   use_sal_head: bool = False,
   warmup_epochs: int = 0,
   max_epochs: int = 15,
+  low_entropy_threshold: int = 20,
 ):
   _, images_l, true_labels_l, true_masks_l = batch_l
   _, images_u, true_labels_u, true_masks_u = batch_u
@@ -463,7 +459,7 @@ def train_step(
 
   # Generate Pseudo-labels.
   teacher.eval()
-  teacher_outputs = teacher(images, with_saliency=False, with_rep=False)
+  teacher_outputs = teacher(images, with_cam=True, with_saliency=False, with_rep=False)
   features_cls_t = teacher_outputs["features_c"].detach()
   logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
 
@@ -497,7 +493,7 @@ def train_step(
       pseudo_masks,
       logit_seg_large_t,
       # logit_sal_t,
-    ) = apply_aug(
+    ) = apply_mixaug(
       images,
       true_labels,
       pseudo_masks,
@@ -516,7 +512,7 @@ def train_step(
   logit_seg_large_l_t, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
   label_seg_large_u_t = logit_seg_large_u_t.argmax(dim=1)
 
-  # Forward
+  # Student Forward
   outputs = model(images, with_saliency=True, with_mask=True, with_rep=True)
   logit_seg_large = outputs["masks_seg_large"]
   if use_sal_head:
@@ -525,6 +521,17 @@ def train_step(
     logit_sal = logit_seg_large[:, bg_class].unsqueeze(1).detach()
 
   logit_seg_large_l, logit_seg_large_u = logit_seg_large[:NL], logit_seg_large[NL:]
+
+  # Teacher Forward
+  teacher.train()
+  with torch.no_grad():
+    teacher_outputs = teacher(images)
+    pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"]
+    prob_all_t = F.softmax(pred_all_t, dim=1)
+    prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
+    logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
+    prob_large_u_t = F.softmax(logit_seg_large_u_t, dim=1)
+    del teacher_outputs
 
   # (1) Classification loss.
   logit_c = outputs["logits_c"]
@@ -555,8 +562,8 @@ def train_step(
     feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
     masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
 
-    probs_seg_large_l_t = torch.softmax(logit_seg_large_l_t, dim=1)
-    conf_pixels_s2c, pmasks_sal = probs_seg_large_l_t.max(1)
+    probs_seg_large_t = torch.softmax(logit_seg_large_t, dim=1)
+    conf_pixels_s2c, pmasks_sal = probs_seg_large_t.max(1)
 
     conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
     pmasks_sal[~conf_pixels_s2c] = 255
@@ -564,19 +571,6 @@ def train_step(
     loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(DEVICE))
 
     conf_pixels_s2c = conf_pixels_s2c.float().mean()
-
-  # teacher forward
-  teacher.train()
-  with torch.no_grad():
-    teacher_outputs = teacher(images)
-    pred_all_t, rep_all_teacher = teacher_outputs["masks_seg"], teacher_outputs["rep"]
-    prob_all_t = F.softmax(pred_all_t, dim=1)
-    prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
-
-    logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
-    prob_large_u_t = F.softmax(logit_seg_large_u_t)
-
-    del teacher_outputs
 
   # (4) Unsupervised Loss.
   if not w_u:
@@ -593,69 +587,66 @@ def train_step(
     )
 
   # (5) Contrastive loss.
-  if pixels_unreliable.sum() == 0:
+  if not w_contra:
     loss_contra = torch.zeros_like(loss_c)
   else:
-    # rep = outputs["rep"]
-    # pred = outputs["masks_seg"]
+    pred_all = outputs["masks_seg"]
+    rep_all = outputs["rep"]
 
-    # pred_all, rep_all = outs["pred"], outs["rep"]
-
-    low_entropy_threshold = 20
     alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
 
     with torch.no_grad():
       entropy = -torch.sum(prob_large_u_t * torch.log(prob_large_u_t + 1e-10), dim=1)
       low_thresh = np.percentile(entropy[label_seg_large_u_t != 255].cpu().numpy().flatten(), alpha_t)
-      low_entropy_mask = (entropy <= low_thresh) & (label_seg_large_u_t != 255)
+      low_entropy_mask = (entropy < low_thresh) & (label_seg_large_u_t != 255)
 
       high_thresh = np.percentile(entropy[label_seg_large_u_t != 255].cpu().numpy().flatten(), 100 - alpha_t)
       high_entropy_mask = (entropy >= high_thresh) & (label_seg_large_u_t != 255)
 
-      low_mask_all = torch.cat(
-        (
-          (pseudo_masks_l.unsqueeze(1) != 255).float(),
-          low_entropy_mask.unsqueeze(1),
-        )
-      )
+      low_mask_all = torch.cat((
+        (pseudo_masks_l.unsqueeze(1) != 255).float(),
+        low_entropy_mask.unsqueeze(1),
+      ))
 
-      low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")
-      # down sample
-
-      if cfg_contra.get("negative_high_entropy", True):
-          contra_flag += " high"
-          high_mask_all = torch.cat(
-              (
-                  (label_l.unsqueeze(1) != 255).float(),
-                  high_entropy_mask.unsqueeze(1),
-              )
-          )
-      else:
-          contra_flag += " low"
-          high_mask_all = torch.cat(
-              (
-                  (label_l.unsqueeze(1) != 255).float(),
-                  torch.ones(logits_u_aug.shape)
-                  .float()
-                  .unsqueeze(1)
-                  .cuda(),
-              ),
-          )
-      high_mask_all = F.interpolate(
-          high_mask_all, size=pred_all.shape[2:], mode="nearest"
-      )  # down sample
+      low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
+  
+      high_mask_all = torch.cat((
+        (pseudo_masks_l.unsqueeze(1) != 255).float(),
+        high_entropy_mask.unsqueeze(1),
+      ))
+      high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
 
       # down sample and concat
-      label_l_small = F.interpolate(
-          label_onehot(label_l, cfg["net"]["num_classes"]),
-          size=pred_all.shape[2:],
-          mode="nearest",
-      )
-      label_u_small = F.interpolate(
-          label_onehot(label_u_aug, cfg["net"]["num_classes"]),
-          size=pred_all.shape[2:],
-          mode="nearest",
-      )
+      label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest")
+      label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest")
+    
+    cfg_contra = dict(
+      negative_high_entropy=True,
+      low_rank=3,
+      high_rank=20,
+      current_class_threshold=0.3,
+      current_class_negative_threshold=1,
+      unsupervised_entropy_ignore=80,
+      low_entropy_threshold=20,
+      num_negatives=50,
+      num_queries=256,
+      temperature=0.5,
+    )
+
+    new_keys, loss_contra = u2pl.compute_contra_memobank_loss(
+      rep_all,
+      label_l_small.long(),
+      label_u_small.long(),
+      prob_l_t.detach(),
+      prob_u_t.detach(),
+      low_mask_all,
+      high_mask_all,
+      cfg_contra,
+      memobank,
+      queue_ptrlis,
+      queue_size,
+      rep_all_t.detach(),
+    )
 
   loss = w_c * loss_c + w_c2s * loss_c2s + w_s2c * loss_s2c + w_u * loss_u + w_contra * loss_contra
 
@@ -790,6 +781,10 @@ def get_pseudo_label(
   return torch.as_tensor(np.asarray(masks, dtype="int64"))
 
 
+def to_2d(x):
+  return x[..., None, None]
+
+
 def _get_pseudo_label_from_cams(args):
   image, cam, target, (bg_t, fg_t) = args
   image = denormalize(image, *datasets.imagenet_stats())
@@ -848,7 +843,7 @@ def _get_pseudo_label_from_mutual_promotion(args):
 # region Augmentation Policy
 
 
-def apply_aug(images, labels, masks, lgs_seg, beta=1., mix="classmix", ignore_class=None):
+def apply_mixaug(images, labels, masks, lgs_seg, beta=1., mix="classmix", ignore_class=None):
   images_mix = images.detach().clone()
   labels_mix = labels.detach().clone()
   masks_mix = masks.detach().clone()
