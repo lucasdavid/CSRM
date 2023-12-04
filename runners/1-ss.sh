@@ -87,8 +87,8 @@ PROGRESS=true
 
 ## Augmentation
 AUGMENT=collorjitter
-CUTMIX=0
-MIXUP=0
+CUTMIX=0.5
+MIXUP=0.5
 LABELSMOOTHING=0
 
 # Evaluation
