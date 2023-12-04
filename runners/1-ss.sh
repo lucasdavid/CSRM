@@ -98,7 +98,7 @@ CRF_T=0
 CRF_GT=0.7
 
 
-train_single_stage() {
+train_reco() {
   echo "=================================================================="
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
@@ -106,7 +106,7 @@ train_single_stage() {
   WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,s2c:$S2C_MODE,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-ss" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/ss/train.py \
+    $PY scripts/ss/train_reco.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
@@ -176,8 +176,8 @@ inference_single_stage() {
     --device $DEVICE
 }
 
-evaluate_single_stage() {
-  # PRED_DIR=$PROOT/$TAG/$PKIN
+evaluate_pseudo_masks() {
+  # PRED_DIR=experiments/predictions/$PROOT/$TAG/$KIND
   WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
@@ -241,24 +241,25 @@ EID=r3
 # WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r1-best.pth
 TAG=ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3
 WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3-best.pth
-# train_single_stage
+# train_reco
+
+PRED_ROOT=experiments/predictions/$TAG
 
 # DOMAIN=$DOMAIN_TRAIN inference_single_stage
 # DOMAIN=$DOMAIN_VALID inference_single_stage
 # DOMAIN=$DOMAIN_VALID_SEG inference_single_stage
 TAG="RS269-PNOC-r3"
-PRED_DIR=./experiments/predictions/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3@val/cams
-
-PROOT=experiments/predictions
 EVAL_MODE=npy              # used with predictions in $TAG@train/cams
-PKIN=cams
+KIND=cams
 # EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
-# PKIN=segs
+# KIND=segs
 
-# DOMAIN=train TAG=$TAG@train evaluate_single_stage
-DOMAIN=val   TAG=$TAG@val   evaluate_single_stage
 
-MIN_TH=0.15
-MAX_TH=0.41
-# DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_single_stage
-DOMAIN=val   TAG=$TAG@val   CRF_T=10 evaluate_single_stage
+MIN_TH=0.10
+MAX_TH=0.51
+
+DOMAIN=train TAG=$TAG@train PRED_DIR=$PRED_ROOT@train/$KIND evaluate_pseudo_masks
+DOMAIN=val   TAG=$TAG@val PRED_DIR=$PRED_ROOT@val/$KIND evaluate_pseudo_masks
+
+# DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_pseudo_masks
+# DOMAIN=val   TAG=$TAG@val   CRF_T=10 evaluate_pseudo_masks

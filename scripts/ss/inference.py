@@ -15,7 +15,7 @@ from torch.utils.data import Subset
 from tqdm import tqdm
 
 import datasets
-from singlestage import SingleStageModel
+from singlestage import SSM
 from core.networks import *
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *
@@ -73,7 +73,7 @@ def run(args):
   info = ds.classification_info
   print(f'{TAG} dataset={args.dataset} num_classes={info.num_classes}')
 
-  model = SingleStageModel(
+  model = SSM(
     args.architecture,
     num_classes=ds.classification_info.num_classes,
     num_classes_segm=ds.segmentation_info.num_classes,

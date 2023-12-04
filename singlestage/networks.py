@@ -5,7 +5,7 @@ from core.networks import *
 from tools.ai.torch_utils import gap2d, resize_tensor
 
 
-class SingleStageModel(Backbone):
+class SSM(Backbone):
 
   def __init__(
     self,
@@ -158,7 +158,7 @@ class SingleStageModel(Backbone):
 if __name__ == "__main__":
   DEVICE = "cuda"
 
-  model = SingleStageModel(
+  model = SSM(
     "resnet50",  # args.architecture,
     21,  # train_dataset.info.num_classes,
     mode="fix",  # mode=args.mode,

@@ -23,7 +23,7 @@
         "--augment", "colorjitter_classmix",
         "--image_size", "384", "--min_image_size", "384", "--max_image_size", "420",
         "--lr", "0.01", "--wd", "0.001", "--mode", "fix", "--trainable-stem", "false", "--trainable-backbone", "false", "--use_gn", "true",
-        "--architecture", "resnet50", "--restore", "experiments/models/vanilla/voc12-rn50-lr0.1-ls-ra-r1.pth",
+        "--architecture", "resnet50", // "--restore", "/home/ldavid/workspace/logs/pnoc/models/vanilla/voc12-rn50-lr0.1-ls-ra-r1.pth",
         // "--architecture", "resnest269", "--restore", "experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-lsra-r4.pth",
         // "--architecture", "resnest101", "--restore", "experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth",
         // "--lr_alpha_scratch", "1.0", "--lr_alpha_bias", "1.0",
