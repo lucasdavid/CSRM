@@ -1,16 +1,7 @@
-import logging
-import os
-import random
-from collections import OrderedDict
-
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from PIL import Image
-
-# from skimage.filters import gaussian
-from skimage.measure import label, regionprops
 
 
 def get_world_size():

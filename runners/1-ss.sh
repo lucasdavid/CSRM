@@ -154,7 +154,7 @@ train_reco() {
     --restore $RESTORE;
 }
 
-inference_single_stage() {
+inference() {
   echo "=================================================================="
   echo "[Inference:$TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
@@ -245,9 +245,9 @@ WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r
 
 PRED_ROOT=experiments/predictions/$TAG
 
-# DOMAIN=$DOMAIN_TRAIN inference_single_stage
-# DOMAIN=$DOMAIN_VALID inference_single_stage
-# DOMAIN=$DOMAIN_VALID_SEG inference_single_stage
+# DOMAIN=$DOMAIN_TRAIN inference
+# DOMAIN=$DOMAIN_VALID inference
+# DOMAIN=$DOMAIN_VALID_SEG inference
 TAG="RS269-PNOC-r3"
 EVAL_MODE=npy              # used with predictions in $TAG@train/cams
 KIND=cams

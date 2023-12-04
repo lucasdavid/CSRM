@@ -1,4 +1,4 @@
-from .networks import SSM
+from .networks import CSRM
 
 
 __all__ = ["SingleStageModel"]

@@ -15,7 +15,7 @@ from torch.utils.data import Subset
 from tqdm import tqdm
 
 import datasets
-from singlestage import SSM
+from singlestage import CSRM
 from core.networks import *
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *
@@ -73,7 +73,7 @@ def run(args):
   info = ds.classification_info
   print(f'{TAG} dataset={args.dataset} num_classes={info.num_classes}')
 
-  model = SSM(
+  model = CSRM(
     args.architecture,
     num_classes=ds.classification_info.num_classes,
     num_classes_segm=ds.segmentation_info.num_classes,
@@ -141,7 +141,7 @@ def _work(
 
         cams_hr = [resize_tensor(cams.unsqueeze(0), strided_up_size)[0] for cams in cams]
         cams_hr = torch.sum(torch.stack(cams_hr), dim=0)[:, :H, :W]
-        
+
         keys = torch.nonzero(torch.from_numpy(label))[:, 0]
         cams_st = cams_st[keys]
         cams_st /= F.adaptive_max_pool2d(cams_st, (1, 1)) + 1e-5
@@ -149,7 +149,7 @@ def _work(
         cams_hr /= F.adaptive_max_pool2d(cams_hr, (1, 1)) + 1e-5
         keys = np.pad(keys + 1, (1, 0), mode='constant')
         safe_save(cam_path, {"keys": keys, "cam": cams_st.cpu(), "hr_cam": cams_hr.cpu().numpy()})
-      
+
       if not os.path.isfile(seg_path):
         # Masks (saved in deeplab-pytorch's format)
         masks = [resize_tensor(logits[None, ...], (H, W))[0] for logits in masks]
@@ -201,7 +201,7 @@ if __name__ == '__main__':
 
   PREDS_DIR = args.pred_dir or f'./experiments/predictions/{TAG}/'
   WEIGHTS_PATH = args.weights or os.path.join('./experiments/models/', f'{args.tag}.pth')
-  
+
   create_directory(os.path.join(PREDS_DIR, "cams"))
   create_directory(os.path.join(PREDS_DIR, "segs"))
 

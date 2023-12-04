@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import datasets
 import wandb
-from singlestage import SSM, reco
+from singlestage import CSRM, reco
 from tools.ai.demo_utils import crf_inference_label, denormalize
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
@@ -185,7 +185,7 @@ def train_reco(args, wb_run, model_path):
   )
 
   # Network
-  model = SSM(
+  model = CSRM(
     args.architecture,
     num_classes=ts.classification_info.num_classes,
     num_classes_segm=ts.segmentation_info.num_classes,
@@ -386,7 +386,7 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
 
 
 def train_step(
-  model: SSM,
+  model: CSRM,
   images,
   true_labels,
   true_masks,
