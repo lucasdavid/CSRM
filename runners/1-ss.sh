@@ -259,16 +259,17 @@ ARCH=rs269
 RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 
 EPOCHS=30
-MAX_STEPS=74  # 1464 (voc12 train samples) // 16 = 91 steps.
+BATCH_SIZE=4
+MAX_STEPS=366  # 1464 (voc12 train samples) // 16 = 91 steps.
 ACCUMULATE_STEPS=1
 LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
 AUGMENT=cutmix
 
 # DEV:
-# ARCHITECTURE=resnest101
-# ARCH=rs101
-# RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+ARCHITECTURE=resnest101
+ARCH=rs101
+RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # MAX_STEPS=5
 # VALIDATE_MAX_STEPS=5
 # IMAGE_SIZE=384

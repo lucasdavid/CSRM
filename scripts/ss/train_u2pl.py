@@ -293,11 +293,6 @@ def train_u2pl(args, wb_run, model_path):
         # w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
 
         with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
-          if epoch <= args.warmup_epochs:
-            with torch.no_grad():
-              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                t_params.copy_(s_params)
-
           loss, metrics = train_step(
             step,
             epoch,
@@ -336,13 +331,16 @@ def train_u2pl(args, wb_run, model_path):
           scaler.update()
           optimizer.zero_grad()
 
-          if epoch > args.warmup_epochs:
-            with torch.no_grad():
+          with torch.no_grad():
+            if epoch <= args.warmup_epochs:
+              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
+                t_params.copy_(s_params)
+            else:
               ema_decay_origin = 0.99
               warmup_steps = args.warmup_epochs * step_val / args.accumulate_steps
               ema_decay = min(1 - 1 / (1 + optimizer.global_step - warmup_steps), ema_decay_origin)
               for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                  t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
+                t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
 
         train_meter.update({m: v.item() for m, v in metrics.items()})
 
@@ -384,7 +382,7 @@ def train_u2pl(args, wb_run, model_path):
           # Interrupt epoch in case `max_steps < len(train_loader)`.
           break
 
-      valid_model = model if epoch < args.warmup_epochs else teacher
+      valid_model = model if epoch <= args.warmup_epochs else teacher
       miou_best, improved = valid_loop(valid_model, valid_loader, tls, epoch, optimizer, miou_best)
       save_model(valid_model, model_path, parallel=GPUS_COUNT > 1)
 
@@ -405,10 +403,9 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
   model.train()
 
   wandb.log({f"val/{k}": v for k, v in metric_results.items()}, commit=commit)
-  print(
-    f"[Epoch {epoch}/{args.max_epoch}]",
-    *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}" for m, v in metric_results.items())
-  )
+  print(f"[Epoch {epoch}/{args.max_epoch}]",
+        *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
+          for m, v in metric_results.items()))
 
   improved = metric_results["segmentation/miou"] > miou_best
   if improved:
@@ -539,12 +536,12 @@ def train_step(
   loss_c = criterion_c(logit_c, label_smoothing(true_labels, ls).to(DEVICE))
 
   # (2) Segmentation loss.
-  pixels_unreliable = pseudo_masks_l == 255
-  pixels_background = pseudo_masks_l == bg_class
-  pixels_foreground = ~(pixels_unreliable | pixels_background)
-  samples_valid = pixels_foreground.sum((1, 2)) > 0
+  pixels_un = pseudo_masks_l == 255
+  pixels_bg = pseudo_masks_l == bg_class
+  pixels_fg = ~(pixels_un | pixels_bg)
+  samples_valid = pixels_fg.sum((1, 2)) > 0
 
-  conf_pixels_c2s = (~pixels_unreliable.cpu()).float().mean()
+  conf_pixels_c2s = (~pixels_un.cpu()).float().mean()
 
   pseudo_masks_l = pseudo_masks_l.to(DEVICE)
 
