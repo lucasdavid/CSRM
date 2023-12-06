@@ -71,8 +71,8 @@ parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--wd', default=1e-4, type=float)
 parser.add_argument('--label_smoothing', default=0, type=float)
 parser.add_argument('--optimizer', default="sgd", choices=["sgd", "adamw", "lion"])
-parser.add_argument('--momentum', default=.9, type=float)
-parser.add_argument('--nesterov', default=True, type=str2bool)
+parser.add_argument('--momentum', default=0, type=float)
+parser.add_argument('--nesterov', default=False, type=str2bool)
 parser.add_argument('--lr_poly_power', default=0.9, type=float)
 parser.add_argument('--lr_alpha_scratch', default=10., type=float)
 parser.add_argument('--lr_alpha_bias', default=2., type=float)
@@ -380,8 +380,13 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
   improved = metric_results["segmentation/miou"] > miou_best
   if improved:
     miou_best = metric_results["segmentation/miou"]
-    for k in ("miou", "iou"):
-      wandb.run.summary[f"val/segmentation/best_{k}"] = metric_results[f"segmentation/{k}"]
+    wandb.run.summary[f"val/segmentation/best_miou"] = miou_best
+
+  improved = metric_results["priors/miou"] > miou_best
+  if improved:
+    miou_best = metric_results["priors/miou"]
+    wandb.run.summary[f"val/priors/best_miou"] = miou_best
+
   return miou_best, improved
 
 

@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=52:00:00
+#SBATCH --time=64:00:00
 
 ##SBATCH -p sequana_gpu_shared
 ##SBATCH --ntasks-per-node=48
@@ -71,6 +71,7 @@ LR=0.007  # voc12
 
 # Training
 OPTIMIZER=sgd  # sgd,lion,adam
+MOMENTUM=0.9
 FIRST_EPOCH=0
 EPOCHS=50
 BATCH_SIZE=32
@@ -119,6 +120,7 @@ train_reco() {
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
     --lr_alpha_bias $LR_ALPHA_BIAS \
     --lr_poly_power $LR_POLY_POWER \
+    --momentum $MOMENTUM \
     --grad_max_norm $GRAD_MAX_NORM \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
@@ -250,26 +252,26 @@ evaluate_pseudo_masks() {
 }
 
 
-LR=0.007
+LR=0.001
+MOMENTUM=0
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=false
 ARCHITECTURE=resnest269
 ARCH=rs269
-RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 
-EPOCHS=30
-BATCH_SIZE=4
-MAX_STEPS=366  # 1464 (voc12 train samples) // 16 = 91 steps.
+EPOCHS=5
+MAX_STEPS=146  # 1464 (voc12 train samples) // 16 = 91 steps.
+BATCH_SIZE=10
 ACCUMULATE_STEPS=1
 LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
 AUGMENT=cutmix
 
 # DEV:
-ARCHITECTURE=resnest101
-ARCH=rs101
-RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+# ARCHITECTURE=resnest101
+# ARCH=rs101
+# RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # MAX_STEPS=5
 # VALIDATE_MAX_STEPS=5
 # IMAGE_SIZE=384
@@ -289,8 +291,9 @@ EID=r1  # Experiment ID
 # RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
 # RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
 # RESTORE=experiments/models/puzzle/ResNeSt50@Puzzle@optimal.pth
-
+# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # RESTORE=experiments/models/vanilla/voc12-rn101-lr0.1-rals-r1.pth
+RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rs50fe-rals-ce-lr0.01-cwnone-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
 # RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
@@ -313,9 +316,8 @@ WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
 
 # DOMAIN=$DOMAIN_TRAIN inference
-DOMAIN=$DOMAIN_VALID inference
+DOMAIN=$DOMAIN_VALID     inference
 DOMAIN=$DOMAIN_VALID_SEG inference
-TAG="RS269-PNOC-r3"
 EVAL_MODE=npy              # used with predictions in $TAG@train/cams
 KIND=cams
 # EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
@@ -324,7 +326,7 @@ KIND=cams
 MIN_TH=0.10
 MAX_TH=0.51
 PRED_DIR=$PRED_ROOT@train/$KIND
-DOMAIN=train TAG=$TAG@train evaluate_pseudo_masks
+DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
 DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_pseudo_masks
 PRED_DIR=$PRED_ROOT@val/$KIND
 DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks

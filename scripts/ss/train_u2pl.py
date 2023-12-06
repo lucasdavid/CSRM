@@ -71,8 +71,8 @@ parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--wd', default=1e-4, type=float)
 parser.add_argument('--label_smoothing', default=0, type=float)
 parser.add_argument('--optimizer', default="sgd", choices=["sgd", "adamw", "lion"])
-parser.add_argument('--momentum', default=.9, type=float)
-parser.add_argument('--nesterov', default=True, type=str2bool)
+parser.add_argument('--momentum', default=0, type=float)
+parser.add_argument('--nesterov', default=False, type=str2bool)
 parser.add_argument('--lr_poly_power', default=0.9, type=float)
 parser.add_argument('--lr_alpha_scratch', default=10., type=float)
 parser.add_argument('--lr_alpha_bias', default=2., type=float)
@@ -606,7 +606,7 @@ def train_step(
       ))
 
       low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
-  
+
       high_mask_all = torch.cat((
         (pseudo_masks_l.unsqueeze(1) != 255).float(),
         high_entropy_mask.unsqueeze(1),
@@ -616,7 +616,7 @@ def train_step(
       # down sample and concat
       label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest")
       label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest")
-    
+
     cfg_contra = dict(
       negative_high_entropy=True,
       low_rank=3,
