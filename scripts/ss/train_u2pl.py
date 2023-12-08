@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import datasets
 import wandb
-from singlestage import CSRM, reco, u2pl
+from singlestage import CSRM, reco, u2pl, data_utils
 from singlestage.mutual_promotion import get_pseudo_label
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
@@ -118,8 +118,8 @@ def train_u2pl(args, wb_run, model_path):
 
   crop_size = [args.image_size] * 2
   scale_size = (args.min_image_size / args.image_size, args.max_image_size / args.image_size)
-  aug_transform = partial(reco.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, blur=False)
-  noaug_transform = partial(reco.transform, crop_size=crop_size, augmentation=False)
+  aug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, blur=False)
+  noaug_transform = partial(data_utils.transform, crop_size=crop_size, augmentation=False)
 
   train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform)
   train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform)
@@ -141,7 +141,7 @@ def train_u2pl(args, wb_run, model_path):
   train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=True)
   train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
   valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
-  log_dataset(args.dataset, train_l_ds, reco.transform, reco.transform)
+  log_dataset(args.dataset, train_l_ds, data_utils.transform, data_utils.transform)
 
   step_val = args.max_steps or len(train_l_loader)
   step_log = max(int(step_val * args.print_ratio), 1)
@@ -179,6 +179,7 @@ def train_u2pl(args, wb_run, model_path):
         print("    Skip init:", m)
     model.load_state_dict(state_dict, strict=False)
   else:
+    # Because this model was pretrained.
     model.from_scratch_layers.append(model.classifier)
     model.initialize([model.classifier])
 
@@ -283,7 +284,8 @@ def train_u2pl(args, wb_run, model_path):
             s2c_sigma=s2c_sigma,
             c2s_sigma=c2s_sigma,
             num_classes=num_classes_segm,
-            bg_class=tls.segmentation_info.bg_class,
+            bg_class_clf=tls.classification_info.bg_class,
+            bg_class_seg=tls.segmentation_info.bg_class,
             augment=args.augment,
             cutmix_prob=args.cutmix_prob,
             use_sal_head=args.use_sal_head,
@@ -405,7 +407,8 @@ def train_step(
   c2s_sigma: float,
   c2s_mode: str,
   num_classes: int,
-  bg_class: int,
+  bg_class_clf: int,
+  bg_class_seg: int,
   augment: str = "none",
   cutmix_prob: float = 0.5,
   use_sal_head: bool = False,
@@ -445,7 +448,7 @@ def train_step(
       images,
       true_labels,
       cams=features_cls_t,
-      masks_bg=logit_seg_large_t[:, bg_class],
+      masks_bg=logit_seg_large_t[:, bg_class_seg],
       thresholds=thresholds,
       resize_align_corners=True,
       mode=c2s_mode,
@@ -460,15 +463,17 @@ def train_step(
       pseudo_masks,
       logit_seg_large_t,
       # logit_sal_t,
-    ) = reco.apply_mixaug(
+    ) = data_utils.mixaug(
       images,
       true_labels,
       pseudo_masks,
       logit_seg_large_t.cpu(),
       # logit_sal_t.cpu(),
       beta=1.0,
+      k=1,
       mix=mix,
-      ignore_class=bg_class,
+      ignore_class=bg_class_seg,
+      bg_in_labels=bg_class_clf is not None,
     )
 
     logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
@@ -485,7 +490,7 @@ def train_step(
   if use_sal_head:
     logit_sal = outputs["masks_sal_large"]
   else:
-    logit_sal = logit_seg_large[:, bg_class].unsqueeze(1).detach()
+    logit_sal = logit_seg_large[:, bg_class_seg].unsqueeze(1).detach()
 
   logit_seg_large_l, logit_seg_large_u = logit_seg_large[:NL], logit_seg_large[NL:]
 
@@ -507,7 +512,7 @@ def train_step(
 
   # (2) Segmentation loss.
   pixels_un = pseudo_masks_l == 255
-  pixels_bg = pseudo_masks_l == bg_class
+  pixels_bg = pseudo_masks_l == bg_class_seg
   pixels_fg = ~(pixels_un | pixels_bg)
   samples_valid = pixels_fg.sum((1, 2)) > 0
 
