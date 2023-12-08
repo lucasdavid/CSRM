@@ -9,7 +9,7 @@ import torchvision.transforms.functional as transforms_f
 from PIL import Image, ImageFilter
 
 
-def transform(image, label, logits=None, crop_size=(512, 512), scale_size=(0.8, 1.0), augmentation=True):
+def transform(image, label, logits=None, crop_size=(512, 512), scale_size=(0.8, 1.0), augmentation=True, color=True, blur=True):
     # Random rescale image
     raw_w, raw_h = image.size
     scale_ratio = random.uniform(scale_size[0], scale_size[1])
@@ -40,13 +40,13 @@ def transform(image, label, logits=None, crop_size=(512, 512), scale_size=(0.8, 
 
     if augmentation:
         # Random color jitter
-        if torch.rand(1) > 0.2:
+        if color and torch.rand(1) > 0.2:
             color_transform = transforms.ColorJitter((0.75, 1.25), (0.75, 1.25), (0.75, 1.25), (-0.25, 0.25))  # For PyTorch 1.9/TorchVision 0.10 users
             # color_transform = transforms.ColorJitter.get_params((0.75, 1.25), (0.75, 1.25), (0.75, 1.25), (-0.25, 0.25))
             image = color_transform(image)
 
         # Random Gaussian filter
-        if torch.rand(1) > 0.5:
+        if blur and torch.rand(1) > 0.5:
             sigma = random.uniform(0.15, 1.15)
             image = image.filter(ImageFilter.GaussianBlur(radius=sigma))
 

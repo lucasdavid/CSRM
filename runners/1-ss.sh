@@ -63,7 +63,6 @@ DILATED=false
 USE_SAL_HEAD=false
 USE_REP_HEAD=true
 MODE=normal
-REGULAR=none
 
 LR=0.007  # voc12
 # LR=0.004  # coco14
@@ -132,7 +131,6 @@ train_reco() {
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
     --trainable-backbone $TRAINABLE_BONE \
-    --regularization $REGULAR \
     --image_size $IMAGE_SIZE \
     --min_image_size $MIN_IMAGE_SIZE \
     --max_image_size $MAX_IMAGE_SIZE \
@@ -145,6 +143,7 @@ train_reco() {
     --max_steps $MAX_STEPS \
     --dataset $DATASET \
     --data_dir $DATA_DIR \
+    --sampler $SAMPLER \
     --domain_train $DOMAIN_TRAIN \
     --domain_valid $DOMAIN_VALID \
     --progress $PROGRESS \
@@ -176,6 +175,7 @@ train_u2pl() {
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
     --lr_alpha_bias $LR_ALPHA_BIAS \
     --lr_poly_power $LR_POLY_POWER \
+    --momentum $MOMENTUM \
     --grad_max_norm $GRAD_MAX_NORM \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
@@ -187,7 +187,6 @@ train_u2pl() {
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
     --trainable-backbone $TRAINABLE_BONE \
-    --regularization $REGULAR \
     --image_size $IMAGE_SIZE \
     --min_image_size $MIN_IMAGE_SIZE \
     --max_image_size $MAX_IMAGE_SIZE \
@@ -200,7 +199,9 @@ train_u2pl() {
     --max_steps $MAX_STEPS \
     --dataset $DATASET \
     --data_dir $DATA_DIR \
+    --sampler $SAMPLER \
     --domain_train $DOMAIN_TRAIN \
+    --domain_train_unlabeled $DOMAIN_TRAIN_UNLABELED \
     --domain_valid $DOMAIN_VALID \
     --progress $PROGRESS \
     --validate $PERFORM_VALIDATION \
@@ -219,7 +220,6 @@ inference() {
   CUDA_VISIBLE_DEVICES=$DEVICES \
     $PY scripts/ss/inference.py \
     --architecture $ARCHITECTURE \
-    --regularization $REGULAR \
     --dilated $DILATED \
     --use_sal_head $USE_SAL_HEAD \
     --use_rep_head $USE_REP_HEAD \
@@ -257,21 +257,27 @@ MOMENTUM=0
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=false
+
 ARCHITECTURE=resnest269
 ARCH=rs269
+# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+
+DOMAIN_TRAIN=train_aug
+DOMAIN_TRAIN_UNLABELED=train_aug
+SAMPLER=default
 
 EPOCHS=5
-MAX_STEPS=146  # 1464 (voc12 train samples) // 16 = 91 steps.
-BATCH_SIZE=10
+MAX_STEPS=366  # 1464 (voc12 train samples) // 16 = 91 steps.
+BATCH_SIZE=4
 ACCUMULATE_STEPS=1
 LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
 AUGMENT=cutmix
 
 # DEV:
-# ARCHITECTURE=resnest101
-# ARCH=rs101
-# RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+ARCHITECTURE=resnest101
+ARCH=rs101
+RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # MAX_STEPS=5
 # VALIDATE_MAX_STEPS=5
 # IMAGE_SIZE=384
@@ -285,29 +291,7 @@ WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_MODE=cam
 
-EID=r1  # Experiment ID
-
-# RESTORE=experiments/models/vanilla/voc12-rn50-ra-ls.pth
-# RESTORE=experiments/models/vanilla/voc12-rn101-lr0.01-wd0.0001-rals-r1.pth
-# RESTORE=experiments/models/vanilla/voc12-rs269-lr0.1-rals-r4.pth
-# RESTORE=experiments/models/puzzle/ResNeSt50@Puzzle@optimal.pth
-# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-# RESTORE=experiments/models/vanilla/voc12-rn101-lr0.1-rals-r1.pth
-RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rs50fe-rals-ce-lr0.01-cwnone-r1.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rn101-lr0.1-ra-r1.pth
-# RESTORE=experiments/models/vanilla/deepglobe-rn101fe-lr0.1-ra-r1.pth
-
-# TAG=ss/$DATASET-${ARCH}-lr${LR}-reco-wsss-w_s2c0.1-$AUGMENT-ls-$EID
-# WEIGHTS=experiments/models/$TAG-best.pth
-#
-
-# TAG=ss/voc12-rs269-lr0.007-reco-wsss-w_s2c0.1-cutmix-ls-r1
-# TAG=ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r1
-# WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r1-best.pth
-# TAG=ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3
-# WEIGHTS=experiments/models/ss/voc12-rs269-lr0.001-reco-wsss-w_s2c0.1-cutmix-ls-r3-best.pth
-# train_reco
+EID=r2  # Experiment ID
 
 TAG=u2pl/$DATASET-${ARCH}-lr${LR}-$AUGMENT-ls-$EID
 train_u2pl

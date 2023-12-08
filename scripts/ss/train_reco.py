@@ -45,7 +45,6 @@ parser.add_argument('--sampler', default="balanced", type=str, choices=["default
 # Network
 parser.add_argument('--architecture', default='resnet50', type=str)
 parser.add_argument('--mode', default='normal', type=str, choices=["normal", "fix"])
-parser.add_argument('--regularization', default=None, type=str)  # kernel_usage
 parser.add_argument('--trainable-stem', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
 parser.add_argument('--use_sal_head', default=False, type=str2bool)

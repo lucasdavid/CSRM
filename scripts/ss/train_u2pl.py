@@ -4,7 +4,7 @@ import os
 import time
 from functools import partial
 from multiprocessing import Pool
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 
 import numpy as np
 import sklearn.metrics as skmetrics
@@ -39,13 +39,13 @@ parser.add_argument('--num_workers', default=8, type=int)
 parser.add_argument('--dataset', default='voc12', choices=datasets.DATASOURCES)
 parser.add_argument('--data_dir', required=True, type=str)
 parser.add_argument('--domain_train', default=None, type=str)
+parser.add_argument('--domain_train_unlabeled', default=None, type=str)
 parser.add_argument('--domain_valid', default=None, type=str)
 parser.add_argument('--sampler', default="default", type=str, choices=["default", "balanced"])
 
 # Network
 parser.add_argument('--architecture', default='resnet50', type=str)
 parser.add_argument('--mode', default='normal', type=str, choices=["normal", "fix"])
-parser.add_argument('--regularization', default=None, type=str)  # kernel_usage
 parser.add_argument('--trainable-stem', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
 parser.add_argument('--use_sal_head', default=False, type=str2bool)
@@ -116,37 +116,34 @@ class RecoAugSegmentationDataset(datasets.SegmentationDataset):
   def __init__(
     self,
     data_source: datasets.CustomDataSource,
-    crop_size: Tuple[int, int] = (512, 512),
-    scale_size: Tuple[float, float] = (1.0, 1.0),
-    augmentation=False,
+    transform: Callable = None,
     **kwargs
   ):
     super().__init__(data_source, **kwargs)
-    self.crop_size = crop_size
-    self.scale_size = scale_size
-    self.augmentation = augmentation
+    self.transform = transform
 
   def __getitem__(self, index):
     sample_id, label = self.get_valid_sample(index)
     image = self.data_source.get_image(sample_id)
     mask = self.data_source.get_mask(sample_id)
-    image, mask = reco.transform(
-      image,
-      mask,
-      crop_size=self.crop_size,
-      scale_size=self.scale_size,
-      augmentation=self.augmentation,
-    )
+    if self.transform:
+      image, mask = self.transform(image, mask)
     return sample_id, image, label, mask[0]
 
 
 def train_u2pl(args, wb_run, model_path):
-  tls = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train")
-  tus = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train, split="train_aug")
-  vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid, split="valid")
-  train_l_dataset = RecoAugSegmentationDataset(tls, crop_size=(args.image_size,) * 2, augmentation=True, scale_size=(0.5, 1.5))
-  train_u_dataset = RecoAugSegmentationDataset(tus, crop_size=(args.image_size,)*2, augmentation=False)
-  valid_dataset = RecoAugSegmentationDataset(vs, crop_size=(args.image_size,) * 2, augmentation=False)
+  tls = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train)
+  tus = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train_unlabeled)
+  vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid)
+
+  crop_size = [args.image_size] * 2
+  scale_size = (args.min_image_size / args.image_size, args.max_image_size / args.image_size)
+  aug_transform = partial(reco.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, blur=False)
+  noaug_transform = partial(reco.transform, crop_size=crop_size, augmentation=False)
+
+  train_l_dataset = RecoAugSegmentationDataset(tls, transform=aug_transform)
+  train_u_dataset = RecoAugSegmentationDataset(tus, transform=noaug_transform)
+  valid_dataset = RecoAugSegmentationDataset(vs, transform=noaug_transform)
 
   if args.sampler == "default":
     sampler = None
@@ -406,12 +403,15 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
   print(f"[Epoch {epoch}/{args.max_epoch}]",
         *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
           for m, v in metric_results.items()))
+  
+  for metric in ("segmentation/miou", "priors/miou"):
+    if metric_results[metric] > wandb.run.summary[f"{metric}/best_miou"]:
+      wandb.run.summary[f"{metric}/best_miou"] = metric_results[metric]
 
-  improved = metric_results["segmentation/miou"] > miou_best
+  improved = metric_results["priors/miou"] > miou_best
   if improved:
-    miou_best = metric_results["segmentation/miou"]
-    for k in ("miou", "iou"):
-      wandb.run.summary[f"val/segmentation/best_{k}"] = metric_results[f"segmentation/{k}"]
+    miou_best = metric_results["priors/miou"]
+    wandb.run.summary[f"val/priors/best_miou"] = metric_results[f"priors/miou"]
   return miou_best, improved
 
 
