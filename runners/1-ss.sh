@@ -71,6 +71,7 @@ LR=0.007  # voc12
 # Training
 OPTIMIZER=sgd  # sgd,lion,adam
 MOMENTUM=0.9
+NESTEROV=true
 FIRST_EPOCH=0
 EPOCHS=50
 BATCH_SIZE=32
@@ -120,6 +121,7 @@ train_reco() {
     --lr_alpha_bias $LR_ALPHA_BIAS \
     --lr_poly_power $LR_POLY_POWER \
     --momentum $MOMENTUM \
+    --nesterov $NESTEROV \
     --grad_max_norm $GRAD_MAX_NORM \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
@@ -176,6 +178,7 @@ train_u2pl() {
     --lr_alpha_bias $LR_ALPHA_BIAS \
     --lr_poly_power $LR_POLY_POWER \
     --momentum $MOMENTUM \
+    --nesterov $NESTEROV \
     --grad_max_norm $GRAD_MAX_NORM \
     --batch_size $BATCH_SIZE \
     --accumulate_steps $ACCUMULATE_STEPS \
@@ -252,8 +255,9 @@ evaluate_pseudo_masks() {
 }
 
 
-LR=0.001
-MOMENTUM=0
+LR=0.007
+MOMENTUM=0.9
+NESTEROV=true
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=false
@@ -299,19 +303,19 @@ train_u2pl
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
 
-# DOMAIN=$DOMAIN_TRAIN inference
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-EVAL_MODE=npy              # used with predictions in $TAG@train/cams
-KIND=cams
-# EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
-# KIND=segs
+# # DOMAIN=$DOMAIN_TRAIN inference
+# DOMAIN=$DOMAIN_VALID     inference
+# DOMAIN=$DOMAIN_VALID_SEG inference
+# EVAL_MODE=npy              # used with predictions in $TAG@train/cams
+# KIND=cams
+# # EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
+# # KIND=segs
 
-MIN_TH=0.10
-MAX_TH=0.51
-PRED_DIR=$PRED_ROOT@train/$KIND
-DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
-DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_pseudo_masks
-PRED_DIR=$PRED_ROOT@val/$KIND
-DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
-DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
+# MIN_TH=0.10
+# MAX_TH=0.51
+# PRED_DIR=$PRED_ROOT@train/$KIND
+# DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
+# DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_pseudo_masks
+# PRED_DIR=$PRED_ROOT@val/$KIND
+# DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
+# DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks

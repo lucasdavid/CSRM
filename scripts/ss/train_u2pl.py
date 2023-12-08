@@ -4,7 +4,7 @@ import os
 import time
 from functools import partial
 from multiprocessing import Pool
-from typing import List, Tuple, Callable
+from typing import List
 
 import numpy as np
 import sklearn.metrics as skmetrics
@@ -16,7 +16,7 @@ from tqdm import tqdm
 import datasets
 import wandb
 from singlestage import CSRM, reco, u2pl
-from tools.ai.demo_utils import crf_inference_label, denormalize
+from singlestage.mutual_promotion import get_pseudo_label
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
 from tools.ai.optim_utils import get_optimizer, linear_schedule
@@ -111,26 +111,6 @@ GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
 
 
-class RecoAugSegmentationDataset(datasets.SegmentationDataset):
-
-  def __init__(
-    self,
-    data_source: datasets.CustomDataSource,
-    transform: Callable = None,
-    **kwargs
-  ):
-    super().__init__(data_source, **kwargs)
-    self.transform = transform
-
-  def __getitem__(self, index):
-    sample_id, label = self.get_valid_sample(index)
-    image = self.data_source.get_image(sample_id)
-    mask = self.data_source.get_mask(sample_id)
-    if self.transform:
-      image, mask = self.transform(image, mask)
-    return sample_id, image, label, mask[0]
-
-
 def train_u2pl(args, wb_run, model_path):
   tls = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train)
   tus = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train_unlabeled)
@@ -141,9 +121,9 @@ def train_u2pl(args, wb_run, model_path):
   aug_transform = partial(reco.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, blur=False)
   noaug_transform = partial(reco.transform, crop_size=crop_size, augmentation=False)
 
-  train_l_dataset = RecoAugSegmentationDataset(tls, transform=aug_transform)
-  train_u_dataset = RecoAugSegmentationDataset(tus, transform=noaug_transform)
-  valid_dataset = RecoAugSegmentationDataset(vs, transform=noaug_transform)
+  train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform)
+  train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform)
+  valid_ds = datasets.SegmentationDataset(vs, transform=noaug_transform)
 
   if args.sampler == "default":
     sampler = None
@@ -155,13 +135,13 @@ def train_u2pl(args, wb_run, model_path):
     weights = compute_sample_weight("balanced", labels)
     generator = torch.Generator()
     generator.manual_seed(args.seed + 153)
-    sampler = WeightedRandomSampler(weights, len(train_l_dataset), replacement=True, generator=generator)
+    sampler = WeightedRandomSampler(weights, len(train_l_ds), replacement=True, generator=generator)
     shuffle = None
 
-  train_l_loader = DataLoader(train_l_dataset, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=True)
-  train_u_loader = DataLoader(train_u_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
-  valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
-  log_dataset(args.dataset, train_l_dataset, reco.transform, reco.transform)
+  train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=True)
+  train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
+  valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
+  log_dataset(args.dataset, train_l_ds, reco.transform, reco.transform)
 
   step_val = args.max_steps or len(train_l_loader)
   step_log = max(int(step_val * args.print_ratio), 1)
@@ -278,16 +258,9 @@ def train_u2pl(args, wb_run, model_path):
           w_u = 0
           w_contra = 0
         else:
-          # w_s2c = linear_schedule(optimizer.global_step, optimizer.max_step, 0.1, 1.0, 1.0)
           w_s2c = linear_schedule(epoch, args.max_epoch, 0.1, 1.0, 1.0)
           w_u = 1
           w_contra = 1
-
-        # Others:
-        # fg_t = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5,  0.2, 1.0, constraint=max)
-        # bg_t = linear_schedule(optimizer.global_step, optimizer.max_step, 0.01, 0.2, 1.0)
-        # w_c2s = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
-        # w_u = linear_schedule(optimizer.global_step, optimizer.max_step, 0.5, 1.0, 0.5)
 
         with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
           loss, metrics = train_step(
@@ -404,14 +377,11 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
         *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
           for m, v in metric_results.items()))
   
-  for metric in ("segmentation/miou", "priors/miou"):
-    if metric_results[metric] > wandb.run.summary[f"{metric}/best_miou"]:
-      wandb.run.summary[f"{metric}/best_miou"] = metric_results[metric]
-
-  improved = metric_results["priors/miou"] > miou_best
+  miou_now = metric_results["priors/miou"]
+  improved = miou_now > miou_best
   if improved:
-    miou_best = metric_results["priors/miou"]
-    wandb.run.summary[f"val/priors/best_miou"] = metric_results[f"priors/miou"]
+    miou_best = miou_now
+    wandb.run.summary[f"val/priors/best_miou"] = miou_now
   return miou_best, improved
 
 
@@ -490,7 +460,7 @@ def train_step(
       pseudo_masks,
       logit_seg_large_t,
       # logit_sal_t,
-    ) = apply_mixaug(
+    ) = reco.apply_mixaug(
       images,
       true_labels,
       pseudo_masks,
@@ -748,161 +718,6 @@ def valid_step(
   results.update({f"classification/{k}": v for k, v in results_clf.items()})
   return results
 
-
-def get_pseudo_label(
-  images, targets, cams, masks_bg, thresholds, resize_align_corners=None, mode="cam", c2s_sigma=0.5, clf_t=0.5
-):
-  sizes = images.shape[2:]
-
-  cams = cams.cpu().to(torch.float32)
-  cams *= to_2d(targets)
-  cams = make_cam(cams, inplace=True, global_norm=False)
-  cams = resize_tensor(cams, sizes, align_corners=resize_align_corners)
-  cams = to_numpy(cams)
-
-  targets_b = to_numpy(targets) > clf_t
-
-  images = to_numpy(images)
-  masks_bg = to_numpy(masks_bg)
-
-  with Pool(processes=len(images)) as pool:
-    if mode == "cam":
-      _fn = _get_pseudo_label_from_cams
-      _args = [(i, c, t, thresholds) for i, c, t in zip(images, cams, targets_b)]
-    else:
-      _fn = _get_pseudo_label_from_mutual_promotion
-      _args = [(i, c, t, m, c2s_sigma) for i, c, t, m in zip(images, cams, targets_b, masks_bg)]
-
-    masks = pool.map(_fn, _args)
-
-  return torch.as_tensor(np.asarray(masks, dtype="int64"))
-
-
-def to_2d(x):
-  return x[..., None, None]
-
-
-def _get_pseudo_label_from_cams(args):
-  image, cam, target, (bg_t, fg_t) = args
-  image = denormalize(image, *datasets.imagenet_stats())
-
-  cam = cam[target]
-  labels = np.concatenate(([0], np.where(target)[0] + 1))
-
-  fg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=fg_t)
-  fg_cam = np.argmax(fg_cam, axis=0)
-  fg_conf = labels[crf_inference_label(image, fg_cam, n_labels=labels.shape[0], t=10, gt_prob=0.7)]
-
-  bg_cam = np.pad(cam, ((1, 0), (0, 0), (0, 0)), mode='constant', constant_values=bg_t)
-  bg_cam = np.argmax(bg_cam, axis=0)
-  bg_conf = labels[crf_inference_label(image, bg_cam, n_labels=labels.shape[0], t=10, gt_prob=0.7)]
-
-  mask = fg_conf.copy()
-  mask[fg_conf == 0] = 255
-  mask[bg_conf + fg_conf == 0] = 0
-
-  return mask
-
-
-def _get_pseudo_label_from_mutual_promotion(args):
-  image, cam, target, bg_mask, c2s_sigma = args
-  image = denormalize(image, *datasets.imagenet_stats())
-
-  cam = cam[target]
-  labels = np.concatenate(([0], np.where(target)[0] + 1))
-
-  ## bg_mask and cam are normalized probs:
-  probs = np.concatenate((bg_mask[np.newaxis, ...], cam), axis=0)
-  mask = np.argmax(probs, axis=0)
-  # mask = crf_inference_label(image, mask, t=10, n_labels=labels.shape[0], gt_prob=0.7)
-  mask = labels[mask]
-
-  ## bg_mask and cam are logits:
-  # logit = np.concatenate((bg_mask[np.newaxis, ...], cam), axis=0)
-  # probs = scipy.special.softmax(logit, axis=0)
-  # probs = crf_inference(image, probs, t=10)
-  # mask = labels[np.argmax(probs, axis=0)]
-
-  # logit = np.concatenate((bg_mask[np.newaxis, ...], cam), axis=0)
-  # probs = scipy.special.softmax(logit, axis=0)
-  # mask = np.argmax(probs, axis=0)
-  # mask = labels[crf_inference_label(image, mask, t=10, n_labels=labels.shape[0])]
-
-  uncertain_pixels = probs.max(axis=0) < c2s_sigma
-  mask[uncertain_pixels] = 255
-
-  # print(f"labels={labels} cam={cam.shape} bg_mask={bg_mask.shape} logit={logit.shape} probs={probs.shape} mask={mask.shape}")
-  # print(f"mask={mask.shape} uncertain_pixels={uncertain_pixels.shape}")
-
-  return mask
-
-
-# region Augmentation Policy
-
-
-def apply_mixaug(images, labels, masks, lgs_seg, beta=1., mix="classmix", ignore_class=None):
-  images_mix = images.detach().clone()
-  labels_mix = labels.detach().clone()
-  masks_mix = masks.detach().clone()
-  lgs_seg_mix = lgs_seg.detach().clone()
-  # lgs_sal_mix = lgs_sal.detach().clone()
-
-  ids = np.arange(len(images), dtype="int")
-  bids = np.asarray([np.random.choice(ids[ids != i]) for i in ids])
-
-  for idx_a, idx_b in zip(ids, bids):
-    if mix == "cutmix":
-      mix_b = generate_cutout_mask(masks[idx_b])
-      alpha_b = mix_b.float().mean()
-      labels_mix = (1 - alpha_b) * labels[idx_a] + alpha_b * labels[idx_b]
-    elif mix == "classmix":
-      mix_b, new_labels = generate_class_mask(masks[idx_b], ignore_class)
-      alpha_b = mix_b.float().mean()
-      labels_mix[idx_a, :] = alpha_b * labels[idx_a]
-      labels_mix[idx_a][new_labels] = 1.0
-    else:
-      raise ValueError(f"Unknown mix {mix}. Options are `cutmix` and `classmix`.")
-
-    # adjusting for padding and empty/uncertain regions.
-    mix_b = (mix_b == 1) & (masks[idx_b] != 255)
-
-    images_mix[idx_a][:, mix_b] = images[idx_b][:, mix_b]
-    masks_mix[idx_a][mix_b] = masks[idx_b][mix_b]
-    lgs_seg_mix[idx_a][:, mix_b] = lgs_seg[idx_b][:, mix_b]
-    # lgs_sal_mix[idx_a][:, mix_b] = lgs_sal[idx_b][:, mix_b]
-
-  return images_mix, labels_mix, masks_mix, lgs_seg_mix  # , lgs_sal_mix
-
-
-def generate_cutout_mask(pseudo_labels, ratio=2):
-  img_size = pseudo_labels.shape
-  cutout_area = img_size[0] * img_size[1] / ratio
-
-  w = np.random.randint(img_size[1] / ratio + 1, img_size[1])
-  h = np.round(cutout_area / w)
-
-  x_start = np.random.randint(0, img_size[1] - w + 1)
-  y_start = np.random.randint(0, img_size[0] - h + 1)
-
-  x_end = int(x_start + w)
-  y_end = int(y_start + h)
-
-  mask = torch.zeros(img_size, dtype=torch.int32)
-  mask[y_start:y_end, x_start:x_end] = 1
-  return mask
-
-
-def generate_class_mask(pseudo_labels, ignore_class=None):
-  labels = torch.unique(pseudo_labels)
-  labels = labels[labels != 255]
-  if ignore_class is not None:
-    labels = labels[labels != ignore_class]
-  labels_select = labels[torch.randperm(len(labels))][:max(len(labels) // 2, 1)]
-  mask = (pseudo_labels.unsqueeze(-1) == labels_select).any(-1)
-  return mask.float(), labels_select
-
-
-# endregion
 
 if __name__ == '__main__':
   args = parser.parse_args()
