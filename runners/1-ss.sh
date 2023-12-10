@@ -111,8 +111,8 @@ train_reco() {
     --tag $TAG \
     --lr $LR \
     --wd $WD \
-    --s2c_mode $S2C_MODE \
-    --c2s_mode $C2S_MODE \
+    --s2c_mode  $S2C_MODE \
+    --c2s_mode  $C2S_MODE \
     --c2s_sigma $C2S_SIGMA \
     --s2c_sigma $S2C_SIGMA \
     --warmup_epochs $WARMUP_EPOCHS \
@@ -172,6 +172,8 @@ train_u2pl() {
     --c2s_mode $C2S_MODE \
     --c2s_sigma $C2S_SIGMA \
     --s2c_sigma $S2C_SIGMA \
+    --w_contra  $W_CONTRA \
+    --w_u       $W_U \
     --warmup_epochs $WARMUP_EPOCHS \
     --optimizer $OPTIMIZER \
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
@@ -295,9 +297,12 @@ WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_MODE=cam
 
-EID=r2  # Experiment ID
+W_CONTRA=1
+W_U=1
 
-TAG=u2pl/$DATASET-${ARCH}-lr${LR}-$AUGMENT-ls-$EID
+EID=r1  # Experiment ID
+
+TAG=u2pl/$DATASET-${ARCH}-lr${LR}-$AUGMENT-ls-u$W_U-c$W_CONTRA-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth

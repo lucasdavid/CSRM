@@ -90,6 +90,8 @@ parser.add_argument('--mixup_prob', default=0.5, type=float)
 parser.add_argument('--c2s_mode', default="cam", choices=["cam", "mp", "gt"])
 parser.add_argument('--c2s_sigma', default=0.5, type=float)
 parser.add_argument('--s2c_sigma', default=0.5, type=float)
+parser.add_argument('--w_u', default=1, type=float)
+parser.add_argument('--w_contra', default=1, type=float)
 parser.add_argument('--warmup_epochs', default=1, type=int)
 
 # RECO
@@ -260,8 +262,8 @@ def train_u2pl(args, wb_run, model_path):
           w_contra = 0
         else:
           w_s2c = linear_schedule(epoch, args.max_epoch, 0.1, 1.0, 1.0)
-          w_u = 1
-          w_contra = 1
+          w_u = args.w_u
+          w_contra = args.w_contra
 
         with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
           loss, metrics = train_step(
