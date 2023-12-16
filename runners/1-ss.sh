@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=64:00:00
+#SBATCH --time=24:00:00
 
 ##SBATCH -p sequana_gpu_shared
 ##SBATCH --ntasks-per-node=48
@@ -162,7 +162,7 @@ train_u2pl() {
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,u2pl" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,u2pl" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-u2pl" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
     $PY scripts/ss/train_u2pl.py \
@@ -172,6 +172,8 @@ train_u2pl() {
     --c2s_mode $C2S_MODE \
     --c2s_sigma $C2S_SIGMA \
     --s2c_sigma $S2C_SIGMA \
+    --c2s_fg    $C2S_FG \
+    --c2s_bg    $C2S_BG \
     --w_contra  $W_CONTRA \
     --w_u       $W_U \
     --warmup_epochs $WARMUP_EPOCHS \
@@ -257,44 +259,39 @@ evaluate_pseudo_masks() {
 }
 
 
-LR=0.007
-MOMENTUM=0.9
-NESTEROV=true
+LR=0.01
+# MOMENTUM=0
+# NESTEROV=false
 MODE=fix
 TRAINABLE_STEM=false
-TRAINABLE_BONE=false
+TRAINABLE_BONE=true
 
 ARCHITECTURE=resnest269
 ARCH=rs269
-# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+
+# ARCHITECTURE=resnest101
+# ARCH=rs101
+# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 
 DOMAIN_TRAIN=train_aug
 DOMAIN_TRAIN_UNLABELED=train_aug
 SAMPLER=default
 
-EPOCHS=5
-MAX_STEPS=366  # 1464 (voc12 train samples) // 16 = 91 steps.
-BATCH_SIZE=4
+EPOCHS=15
+MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+BATCH_SIZE=16
 ACCUMULATE_STEPS=1
 LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
-AUGMENT=cutmix
-
-# DEV:
-ARCHITECTURE=resnest101
-ARCH=rs101
-RESTORE=/home/ldavid/workspace/logs/pnoc/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-# MAX_STEPS=5
-# VALIDATE_MAX_STEPS=5
-# IMAGE_SIZE=384
-# MIN_IMAGE_SIZE=384
-# MAX_IMAGE_SIZE=384
-# BATCH_SIZE=5
+AUGMENT=classmix
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+C2S_FG=0.40
+C2S_BG=0.05
 C2S_MODE=cam
 
 W_CONTRA=1
@@ -302,7 +299,7 @@ W_U=1
 
 EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-${ARCH}-lr${LR}-$AUGMENT-ls-u$W_U-c$W_CONTRA-$EID
+TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-ls-s$SAMPLER-u$W_U-c$W_CONTRA-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth

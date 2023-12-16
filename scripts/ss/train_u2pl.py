@@ -90,6 +90,8 @@ parser.add_argument('--mixup_prob', default=0.5, type=float)
 parser.add_argument('--c2s_mode', default="cam", choices=["cam", "mp", "gt"])
 parser.add_argument('--c2s_sigma', default=0.5, type=float)
 parser.add_argument('--s2c_sigma', default=0.5, type=float)
+parser.add_argument('--c2s_fg', default=0.30, type=float)
+parser.add_argument('--c2s_bg', default=0.05, type=float)
 parser.add_argument('--w_u', default=1, type=float)
 parser.add_argument('--w_contra', default=1, type=float)
 parser.add_argument('--warmup_epochs', default=1, type=int)
@@ -120,8 +122,8 @@ def train_u2pl(args, wb_run, model_path):
 
   crop_size = [args.image_size] * 2
   scale_size = (args.min_image_size / args.image_size, args.max_image_size / args.image_size)
-  aug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, blur=False)
-  noaug_transform = partial(data_utils.transform, crop_size=crop_size, augmentation=False)
+  aug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True)
+  noaug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False)
 
   train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform)
   train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform)
@@ -250,9 +252,6 @@ def train_u2pl(args, wb_run, model_path):
         s2c_sigma = args.s2c_sigma
         c2s_sigma = args.c2s_sigma
 
-        fg_t = 0.30
-        bg_t = 0.05
-
         # Default
         w_c = w_c2s = 1
 
@@ -275,7 +274,7 @@ def train_u2pl(args, wb_run, model_path):
             batch_u,
             criterions,
             memory,
-            thresholds=(bg_t, fg_t),
+            thresholds=(args.c2s_bg, args.c2s_fg),
             ls=args.label_smoothing,
             w_c=w_c,
             w_c2s=w_c2s,
