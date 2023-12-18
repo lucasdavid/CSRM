@@ -259,20 +259,20 @@ evaluate_pseudo_masks() {
 }
 
 
-LR=0.01
-# MOMENTUM=0
-# NESTEROV=false
+LR=0.1
+MOMENTUM=0
+NESTEROV=false
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=true
 
-ARCHITECTURE=resnest269
-ARCH=rs269
-RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+# ARCHITECTURE=resnest269
+# ARCH=rs269
+# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 
-# ARCHITECTURE=resnest101
-# ARCH=rs101
-# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+ARCHITECTURE=resnest101
+ARCH=rs101
+RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 
 DOMAIN_TRAIN=train_aug
 DOMAIN_TRAIN_UNLABELED=train_aug
@@ -280,17 +280,18 @@ SAMPLER=default
 
 EPOCHS=15
 MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-BATCH_SIZE=16
+BATCH_SIZE=32
 ACCUMULATE_STEPS=1
 LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
-AUGMENT=classmix
+# AUGMENT=classmix
+AUGMENT=cutmix
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_FG=0.40
+C2S_FG=0.30
 C2S_BG=0.05
 C2S_MODE=cam
 
@@ -299,19 +300,19 @@ W_U=1
 
 EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-ls-s$SAMPLER-u$W_U-c$W_CONTRA-$EID
+TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-ls-s$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
 
-# # DOMAIN=$DOMAIN_TRAIN inference
+# DOMAIN=$DOMAIN_TRAIN inference
 # DOMAIN=$DOMAIN_VALID     inference
 # DOMAIN=$DOMAIN_VALID_SEG inference
 # EVAL_MODE=npy              # used with predictions in $TAG@train/cams
 # KIND=cams
-# # EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
-# # KIND=segs
+## EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
+## KIND=segs
 
 # MIN_TH=0.10
 # MAX_TH=0.51
@@ -321,3 +322,4 @@ PRED_ROOT=experiments/predictions/$TAG
 # PRED_DIR=$PRED_ROOT@val/$KIND
 # DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
 # DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
+

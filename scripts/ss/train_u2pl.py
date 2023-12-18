@@ -254,6 +254,8 @@ def train_u2pl(args, wb_run, model_path):
 
         # Default
         w_c = w_c2s = 1
+        fg_t = args.c2s_fg
+        bg_t = args.c2s_bg
 
         if args.warmup_epochs and epoch < args.warmup_epochs:
           w_s2c = 0
@@ -274,7 +276,7 @@ def train_u2pl(args, wb_run, model_path):
             batch_u,
             criterions,
             memory,
-            thresholds=(args.c2s_bg, args.c2s_fg),
+            thresholds=(bg_t, fg_t),
             ls=args.label_smoothing,
             w_c=w_c,
             w_c2s=w_c2s,
