@@ -114,19 +114,13 @@ def _work(
 
     for image_id, _, _ in dataset:
       cam_path = os.path.join(preds_dir, "cams", image_id + '.npy')
-      seg_path = os.path.join(preds_dir, "segs", image_id + '.npy')
+      seg_path = os.path.join(preds_dir, "masks", image_id + '.npy')
 
       if os.path.isfile(cam_path) and os.path.isfile(seg_path):
         continue
 
       image = data_source.get_image(image_id)
       label = data_source.get_label(image_id)
-
-      if data_source.classification_info.bg_class is None:
-        label_mask = np.pad(label, (1, 0), constant_values=1)
-      else:
-        label_mask = label
-      label_mask = label_mask.reshape(-1, 1, 1)
 
       W, H = image.size
 
@@ -151,11 +145,13 @@ def _work(
         safe_save(cam_path, {"keys": keys, "cam": cams_st.cpu(), "hr_cam": cams_hr.cpu().numpy()})
 
       if not os.path.isfile(seg_path):
-        # Masks (saved in deeplab-pytorch's format)
-        masks = [resize_tensor(logits[None, ...], (H, W))[0] for logits in masks]
-        p = to_numpy(torch.stack(masks).mean(dim=0))
-        p *= label_mask
-        safe_save(seg_path, p)
+        # Masks.
+        keys = np.nonzero(label)[0]
+        keys = np.pad(keys + 1, (1, 0), mode='constant')
+        masks = [resize_tensor(logits[keys, ...][None, ...], (H, W))[0] for logits in masks]
+        masks = torch.softmax(torch.stack(masks).mean(dim=0), dim=0)
+
+        safe_save(seg_path, {"keys": keys, "hr_cam": to_numpy(masks)})
 
 
 def forward_tta(model, ori_image, scale, DEVICE):
@@ -203,7 +199,7 @@ if __name__ == '__main__':
   WEIGHTS_PATH = args.weights or os.path.join('./experiments/models/', f'{args.tag}.pth')
 
   create_directory(os.path.join(PREDS_DIR, "cams"))
-  create_directory(os.path.join(PREDS_DIR, "segs"))
+  create_directory(os.path.join(PREDS_DIR, "masks"))
 
   set_seed(SEED)
   run(args)

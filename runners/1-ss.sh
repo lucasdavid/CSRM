@@ -97,7 +97,10 @@ MIN_TH=0.05
 MAX_TH=0.81
 CRF_T=0
 CRF_GT=0.7
-
+EVAL_MODE=npy
+KIND=cams
+# KIND=masks
+IGNORE_BG_CAM=false
 
 train_reco() {
   echo "=================================================================="
@@ -255,6 +258,7 @@ evaluate_pseudo_masks() {
     --crf_t $CRF_T \
     --crf_gt_prob $CRF_GT \
     --mode $EVAL_MODE \
+    --ignore_bg_cam $IGNORE_BG_CAM \
     --num_workers $WORKERS_INFER;
 }
 
@@ -301,7 +305,12 @@ W_U=1
 EID=r1  # Experiment ID
 
 TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-ls-s$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
-train_u2pl
+# train_u2pl
+#
+
+ARCHITECTURE=resnest101
+ARCH=rs101
+TAG=u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
@@ -309,16 +318,15 @@ PRED_ROOT=experiments/predictions/$TAG
 # DOMAIN=$DOMAIN_TRAIN inference
 # DOMAIN=$DOMAIN_VALID     inference
 # DOMAIN=$DOMAIN_VALID_SEG inference
-# EVAL_MODE=npy              # used with predictions in $TAG@train/cams
-# KIND=cams
-## EVAL_MODE=deeplab-pytorch  # used with predictions in $TAG@train/segs
-## KIND=segs
+KIND=masks
+IGNORE_BG_CAM=true
 
-# MIN_TH=0.10
-# MAX_TH=0.51
-# PRED_DIR=$PRED_ROOT@train/$KIND
+MIN_TH=0.05
+MAX_TH=0.81
+PRED_DIR=$PRED_ROOT@train/$KIND
 # DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
-# DOMAIN=train TAG=$TAG@train CRF_T=10 evaluate_pseudo_masks
+DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=0.9 evaluate_pseudo_masks
+DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=1.0 evaluate_pseudo_masks
 # PRED_DIR=$PRED_ROOT@val/$KIND
 # DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
 # DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
