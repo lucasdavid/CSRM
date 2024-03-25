@@ -125,8 +125,8 @@ def train_u2pl(args, wb_run, model_path):
   aug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True)
   noaug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False)
 
-  train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform)
-  train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform)
+  train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform, ignore_bg_images=True)
+  train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform, ignore_bg_images=True)
   valid_ds = datasets.SegmentationDataset(vs, transform=noaug_transform)
 
   if args.sampler == "default":

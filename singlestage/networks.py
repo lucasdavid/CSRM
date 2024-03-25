@@ -12,11 +12,12 @@ class CSRM(Backbone):
     model_name,
     num_classes=20,
     num_classes_segm=None,
+    backbone_weights="imagenet",
     mode='fix',
     dilated=False,
     strides=None,
-    regularization=None,
     trainable_stem=False,
+    trainable_stage4=True,
     trainable_backbone=True,
     use_group_norm=False,
     use_sal_head=False,
@@ -26,33 +27,34 @@ class CSRM(Backbone):
   ):
     super().__init__(
       model_name,
+      weights=backbone_weights,
       mode=mode,
       dilated=dilated,
       strides=strides,
       trainable_stem=trainable_stem,
-      trainable_backbone=True,  # This will be performed up ahead.
+      trainable_stage4=trainable_stage4,
+      trainable_backbone=trainable_backbone,
     )
 
-    cin = self.out_features
+    low_level_cin = self.backbone.stage_features[0]
+    cin = self.backbone.outplanes
     norm_fn = group_norm if use_group_norm else nn.BatchNorm2d
 
     self.num_classes = num_classes
     self.num_classes_segm = num_classes_segm or num_classes + 1
-    self.regularization = regularization
-    self.trainable_backbone = trainable_backbone
     self.use_sal_head = use_sal_head
     self.use_rep_head = use_rep_head
     self.dropout = [dropout, dropout] if isinstance(dropout, float) else dropout
 
     ## Pretrained parameters
-    # self.stage1/stage5 = ...
+    # self.backbone = ...
     self.classifier = nn.Conv2d(cin, self.num_classes, 1, bias=False)
 
     ## Scratch parameters
     self.aspp = ASPP(cin, output_stride=16, norm_fn=norm_fn)
 
     self.project = nn.Sequential(
-      nn.Conv2d(256, 48, 1, bias=False),
+      nn.Conv2d(low_level_cin, 48, 1, bias=False),
       norm_fn(48),
       nn.ReLU(inplace=True),
     )
@@ -84,53 +86,42 @@ class CSRM(Backbone):
       )
       self.from_scratch_layers += [*self.representation.modules()]
 
-    if not trainable_backbone:
-      # Do not frozen stage 5, so rep layer can be trained.
-      frozen_stages = [self.stage1, self.stage2, self.stage3, self.stage4]
-      self.not_training.extend(frozen_stages)
-      for stage in frozen_stages:
-        set_trainable_layers(stage, trainable=False)
-
     self.initialize(self.from_scratch_layers)
 
   def forward_features(self, x):
-    x = self.stage1(x)
-    x = self.stage2(x)
-    features_s2 = x
-
-    x = self.stage3(x)
-    x = self.stage4(x)
-    features_s5 = self.stage5(x)
-
-    return features_s5, features_s2
+    return self.backbone(x)
 
   def forward(self, inputs, with_cam=False, with_saliency=False, with_mask=True, with_rep=True, resize_mask=True):
-    features_s5, features_s2 = self.forward_features(inputs)
+    outs = self.forward_features(inputs)
+    features_s2 = outs[0]
+    features_s5 = outs[-1]
 
     outputs = self.classification_branch(features_s5, with_cam=with_cam or with_saliency)
 
-    if with_saliency or with_mask or with_rep:
-      features_s2 = self.project(features_s2)
-      features = self.aspp(features_s5)
+    if not (with_saliency or with_mask or with_rep):
+      return outputs
 
-      features = resize_tensor(features, features_s2.size()[2:], align_corners=True)
-      features = torch.cat((features, features_s2), dim=1)
+    features_s2 = self.project(features_s2)
+    features = self.aspp(features_s5)
 
-      if with_saliency:
-        masks = self.saliency_branch(outputs["features_c"], features)
-        outputs["masks_sal"] = masks
-        if resize_mask:
-          outputs["masks_sal_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
+    features = resize_tensor(features, features_s2.size()[2:], align_corners=True)
+    features = torch.cat((features, features_s2), dim=1)
 
-      if with_mask:
-        masks = self.decoder(features)
-        outputs["masks_seg"] = masks
-        if resize_mask:
-          outputs["masks_seg_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
+    if with_saliency:
+      masks = self.saliency_branch(outputs["features_c"], features)
+      outputs["masks_sal"] = masks
+      if resize_mask:
+        outputs["masks_sal_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
 
-      if with_rep and self.use_rep_head:
-        rep = self.representation(features)
-        outputs["rep"] = rep
+    if with_mask:
+      masks = self.decoder(features)
+      outputs["masks_seg"] = masks
+      if resize_mask:
+        outputs["masks_seg_large"] = resize_tensor(masks, inputs.shape[2:], align_corners=True)
+
+    if with_rep and self.use_rep_head:
+      rep = self.representation(features)
+      outputs["rep"] = rep
 
     return outputs
 
@@ -163,7 +154,6 @@ if __name__ == "__main__":
     21,  # train_dataset.info.num_classes,
     mode="fix",  # mode=args.mode,
     dilated=True,  # dilated=args.dilated,
-    regularization=None,  # regularization=args.regularization,
     trainable_stem=True,  # trainable_stem=args.trainable_stem,
     trainable_backbone=True,
   )

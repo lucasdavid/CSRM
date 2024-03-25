@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 
 ##SBATCH -p sequana_gpu_shared
 ##SBATCH --ntasks-per-node=48
@@ -41,8 +41,8 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-DATASET=voc12  # Pascal VOC 2012
-# DATASET=coco14  # MS COCO 2014
+# DATASET=voc12  # Pascal VOC 2012
+DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -64,7 +64,7 @@ USE_SAL_HEAD=false
 USE_REP_HEAD=true
 MODE=normal
 
-LR=0.007  # voc12
+# LR=0.007  # voc12
 # LR=0.004  # coco14
 # LR=0.001  # deepglobe
 
@@ -262,40 +262,46 @@ evaluate_pseudo_masks() {
     --num_workers $WORKERS_INFER;
 }
 
-
-LR=0.1
+# LR=0.1  # LR from config/dataset.sh
 MOMENTUM=0
 NESTEROV=false
 MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_BONE=true
 
+## Pascal VOC 2012
 # ARCHITECTURE=resnest269
 # ARCH=rs269
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 
+## MS COCO 2014
 ARCHITECTURE=resnest101
 ARCH=rs101
-RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
+VALIDATE_MAX_STEPS=256  # 20%*40504/32
 
-DOMAIN_TRAIN=train_aug
-DOMAIN_TRAIN_UNLABELED=train_aug
+
+# DOMAIN_TRAIN=train_aug
+# DOMAIN_TRAIN_UNLABELED=train_aug
+DOMAIN_TRAIN_UNLABELED=$DOMAIN_TRAIN
 SAMPLER=default
 
 EPOCHS=15
-MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+MAX_STEPS=378   # ceil(10% of (82783 (coco14 train samples) / 32)).
 BATCH_SIZE=32
 ACCUMULATE_STEPS=1
-LABELSMOOTHING=0.1
+LABELSMOOTHING=0
 # AUGMENT=colorjitter # none for DeepGlobe
-# AUGMENT=classmix
-AUGMENT=cutmix
+AUGMENT=classmix
+# AUGMENT=cutmix
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_FG=0.30
+C2S_FG=0.20
 C2S_BG=0.05
 C2S_MODE=cam
 
@@ -304,13 +310,8 @@ W_U=1
 
 EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-ls-s$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
-# train_u2pl
-#
-
-ARCHITECTURE=resnest101
-ARCH=rs101
-TAG=u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1
+TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
+train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
@@ -325,8 +326,8 @@ MIN_TH=0.05
 MAX_TH=0.81
 PRED_DIR=$PRED_ROOT@train/$KIND
 # DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
-DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=0.9 evaluate_pseudo_masks
-DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=1.0 evaluate_pseudo_masks
+# DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=0.9 evaluate_pseudo_masks
+# DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=1.0 evaluate_pseudo_masks
 # PRED_DIR=$PRED_ROOT@val/$KIND
 # DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
 # DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
