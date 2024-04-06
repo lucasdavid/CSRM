@@ -53,6 +53,15 @@ parser.add_argument('--domain', default='train', type=str)
 parser.add_argument('--scales', default='0.5,1.0,1.5,2.0', type=str)
 parser.add_argument('--exclude_bg_images', default=True, type=str2bool)
 
+
+parser.add_argument("--threshold", default=0.25, type=float)
+parser.add_argument("--crf_t", default=0, type=int)
+parser.add_argument("--crf_gt_prob", default=0.7, type=float)
+
+parser.add_argument("--save_cams", default=True, type=str2bool)
+parser.add_argument("--save_masks", default=True, type=str2bool)
+parser.add_argument("--save_pseudos", default=False, type=str2bool)
+
 try:
   GPUS = os.environ["CUDA_VISIBLE_DEVICES"]
 except KeyError:
@@ -86,9 +95,9 @@ def run(args):
   scales = [float(scale) for scale in args.scales.split(',')]
 
   if GPUS_COUNT > 1:
-    multiprocessing.spawn(_work, nprocs=GPUS_COUNT, args=(model, dataset, scales, PREDS_DIR, DEVICE), join=True)
+    multiprocessing.spawn(_work, nprocs=GPUS_COUNT, args=(model, dataset, scales, PREDS_DIR, DEVICE, args), join=True)
   else:
-    _work(0, model, dataset, scales, PREDS_DIR, DEVICE)
+    _work(0, model, dataset, scales, PREDS_DIR, DEVICE, args)
 
 
 def _work(
@@ -98,6 +107,7 @@ def _work(
     scales: List[float],
     preds_dir: str,
     device: str,
+    args: "Namespace",
 ):
   dataset = dataset[process_id]
   data_source = dataset.dataset.data_source
@@ -111,8 +121,11 @@ def _work(
     for image_id, _, _ in dataset:
       cam_path = os.path.join(preds_dir, "cams", image_id + '.npy')
       seg_path = os.path.join(preds_dir, "masks", image_id + '.npy')
+      pse_path = os.path.join(preds_dir, f"pseudos-t{args.threshold}-c{args.crf_t}", image_id + '.png')
 
-      if os.path.isfile(cam_path) and os.path.isfile(seg_path):
+      if ((not args.save_cams or os.path.isfile(cam_path)) and
+          (not args.save_masks or os.path.isfile(seg_path)) and
+          (not args.save_pseudos or os.path.isfile(pse_path))):
         continue
 
       image = data_source.get_image(image_id)
@@ -123,24 +136,52 @@ def _work(
       strided_size = get_strided_size((H, W), 4)
       strided_up_size = get_strided_up_size((H, W), 16)
 
-      cams, masks = zip(*(forward_tta(model, image, scale, device) for scale in scales))
+      cams, masks = zip(*(forward_tta(model, image, scale, device, args.save_masks) for scale in scales))
 
-      if not os.path.isfile(cam_path):
-        cams_st = [resize_tensor(c.unsqueeze(0), strided_size)[0] for c in cams]
-        cams_st = torch.sum(torch.stack(cams_st), dim=0)
+      cams_st = [resize_tensor(c.unsqueeze(0), strided_size)[0] for c in cams]
+      cams_st = torch.sum(torch.stack(cams_st), dim=0)
 
-        cams_hr = [resize_tensor(cams.unsqueeze(0), strided_up_size)[0] for cams in cams]
-        cams_hr = torch.sum(torch.stack(cams_hr), dim=0)[:, :H, :W]
+      cams_hr = [resize_tensor(cams.unsqueeze(0), strided_up_size)[0] for cams in cams]
+      cams_hr = torch.sum(torch.stack(cams_hr), dim=0)[:, :H, :W]
 
-        keys = torch.nonzero(torch.from_numpy(label))[:, 0]
-        cams_st = cams_st[keys]
-        cams_st /= F.adaptive_max_pool2d(cams_st, (1, 1)) + 1e-5
-        cams_hr = cams_hr[keys]
-        cams_hr /= F.adaptive_max_pool2d(cams_hr, (1, 1)) + 1e-5
-        keys = np.pad(keys + 1, (1, 0), mode='constant')
-        safe_save(cam_path, {"keys": keys, "cam": cams_st.cpu(), "hr_cam": cams_hr.cpu().numpy()})
+      keys = torch.nonzero(torch.from_numpy(label))[:, 0]
+      cams_st = cams_st[keys]
+      cams_st /= F.adaptive_max_pool2d(cams_st, (1, 1)) + 1e-5
+      cams_hr = cams_hr[keys]
+      cams_hr /= F.adaptive_max_pool2d(cams_hr, (1, 1)) + 1e-5
+      keys = np.pad(keys + 1, (1, 0), mode='constant')
+      hr_cam = to_numpy(cams_hr)
 
-      if not os.path.isfile(seg_path):
+      if args.save_cams and not os.path.isfile(cam_path):
+        safe_save(cam_path, {"keys": keys, "cam": cams_st.cpu(), "hr_cam": hr_cam})
+
+      if args.save_pseudos:
+        keys = np.pad(np.nonzero(label)[0] + 1, (1, 0), mode="constant")
+        cam = np.pad(hr_cam, ((1, 0), (0, 0), (0, 0)), mode="constant", constant_values=args.threshold)
+        prob = cam
+        cam = np.argmax(cam, axis=0)
+
+        if args.crf_t:
+          img = np.asarray(image).astype(np.uint8)
+
+          if prob is not None and args.crf_gt_prob == 1.0:
+            # DeepLab-pytorch's CRF
+            prob = crf_inference_dlv2_softmax(img, prob, t=args.crf_t)
+            cam = prob.argmax(0)
+          else:
+            cam = crf_inference_label(img, cam, n_labels=max(len(keys), 2), t=args.crf_t, gt_prob=args.crf_gt_prob)
+
+        y_pred = keys[cam]
+
+        try:
+          with Image.fromarray(y_pred.astype(np.uint8)) as p:
+            p.save(pse_path)
+        except:
+          if os.path.exists(pse_path):
+            os.remove(pse_path)
+          raise
+
+      if args.save_masks and not os.path.isfile(seg_path):
         # Masks.
         keys = np.nonzero(label)[0]
         keys = np.pad(keys + 1, (1, 0), mode='constant')
@@ -150,7 +191,7 @@ def _work(
         safe_save(seg_path, {"keys": keys, "hr_cam": to_numpy(masks)})
 
 
-def forward_tta(model, ori_image, scale, DEVICE):
+def forward_tta(model, ori_image, scale, DEVICE, with_mask=True):
   W, H = ori_image.size
 
   # Preprocessing
@@ -168,8 +209,11 @@ def forward_tta(model, ori_image, scale, DEVICE):
   cams = F.relu(features)
   cams = cams[0] + cams[1].flip(-1)
 
-  masks = outputs["masks_seg_large"].cpu().float()
-  masks = masks[0] + masks[1].flip(-1)
+  masks = None
+
+  if with_mask:
+    masks = outputs["masks_seg_large"].cpu().float()
+    masks = masks[0] + masks[1].flip(-1)
 
   return cams, masks
 
@@ -196,6 +240,7 @@ if __name__ == '__main__':
 
   create_directory(os.path.join(PREDS_DIR, "cams"))
   create_directory(os.path.join(PREDS_DIR, "masks"))
+  create_directory(os.path.join(PREDS_DIR, f"pseudos-t{args.threshold}-c{args.crf_t}"))
 
   set_seed(SEED)
   run(args)

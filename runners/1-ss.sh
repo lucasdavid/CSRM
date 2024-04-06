@@ -4,12 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=48:00:00
-
-##SBATCH -p sequana_gpu_shared
-##SBATCH --ntasks-per-node=48
-##SBATCH -p nvidia_long
-##SBATCH --ntasks-per-node=24
+#SBATCH --time=01:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -64,7 +59,7 @@ USE_SAL_HEAD=false
 USE_REP_HEAD=true
 MODE=normal
 
-# LR=0.007  # voc12
+LR=0.007  # voc12
 # LR=0.004  # coco14
 # LR=0.001  # deepglobe
 
@@ -73,9 +68,18 @@ OPTIMIZER=sgd  # sgd,lion,adam
 MOMENTUM=0.9
 NESTEROV=true
 FIRST_EPOCH=0
-EPOCHS=50
-BATCH_SIZE=32
+EPOCHS=15
+BATCH=16
 ACCUMULATE_STEPS=1
+
+# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+MAX_STEPS=378   # ceil(10% of (82783 (coco14 train samples) / 32)).
+
+VALIDATE_MAX_STEPS=512  # 512 (coco14, 20%*40504/32)
+
+DOMAIN_TRAIN_UNLABELED=$DOMAIN_TRAIN
+SAMPLER=default
+# SAMPLER=balanced
 
 LR_ALPHA_SCRATCH=10.0
 LR_ALPHA_BIAS=1.0
@@ -83,14 +87,14 @@ LR_POLY_POWER=0.9
 GRAD_MAX_NORM=1.
 
 MIXED_PRECISION=true
-PERFORM_VALIDATION=true
+PERFORM_VALIDATION=false
 PROGRESS=true
 
 ## Augmentation
 AUGMENT=collorjitter
 CUTMIX=0.5
 MIXUP=0.5
-LABELSMOOTHING=0
+# LABELSMOOTHING=0
 
 # Evaluation
 MIN_TH=0.05
@@ -102,14 +106,16 @@ KIND=cams
 # KIND=masks
 IGNORE_BG_CAM=false
 
+
 train_reco() {
   echo "=================================================================="
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,s2c:$S2C_MODE,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,reco" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,s2c:$S2C_MODE,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,reco" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-reco" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
+    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 \
     $PY scripts/ss/train_reco.py \
     --tag $TAG \
     --lr $LR \
@@ -126,7 +132,7 @@ train_reco() {
     --momentum $MOMENTUM \
     --nesterov $NESTEROV \
     --grad_max_norm $GRAD_MAX_NORM \
-    --batch_size $BATCH_SIZE \
+    --batch_size $BATCH \
     --accumulate_steps $ACCUMULATE_STEPS \
     --mixed_precision $MIXED_PRECISION \
     --architecture $ARCHITECTURE \
@@ -135,6 +141,7 @@ train_reco() {
     --dilated $DILATED \
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
+    --trainable-stage4 $TRAINABLE_STAGE4 \
     --trainable-backbone $TRAINABLE_BONE \
     --image_size $IMAGE_SIZE \
     --min_image_size $MIN_IMAGE_SIZE \
@@ -165,7 +172,7 @@ train_u2pl() {
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,u2pl" \
+  WANDB_TAGS="$DATASET,$ARCH,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,u2pl" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-u2pl" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
     $PY scripts/ss/train_u2pl.py \
@@ -187,7 +194,7 @@ train_u2pl() {
     --momentum $MOMENTUM \
     --nesterov $NESTEROV \
     --grad_max_norm $GRAD_MAX_NORM \
-    --batch_size $BATCH_SIZE \
+    --batch_size $BATCH \
     --accumulate_steps $ACCUMULATE_STEPS \
     --mixed_precision $MIXED_PRECISION \
     --architecture $ARCHITECTURE \
@@ -196,6 +203,7 @@ train_u2pl() {
     --dilated $DILATED \
     --mode $MODE \
     --trainable-stem $TRAINABLE_STEM \
+    --trainable-stage4 $TRAINABLE_STAGE4 \
     --trainable-backbone $TRAINABLE_BONE \
     --image_size $IMAGE_SIZE \
     --min_image_size $MIN_IMAGE_SIZE \
@@ -240,12 +248,16 @@ inference() {
     --dataset $DATASET \
     --domain $DOMAIN \
     --data_dir $DATA_DIR \
-    --device $DEVICE
+    --device $DEVICE \
+    --save_cams false \
+    --save_masks false \
+    --save_pseudos true \
+    --threshold 0.35 \
+    --crf_t 10
 }
 
 evaluate_pseudo_masks() {
-  # PRED_DIR=experiments/predictions/$PROOT/$TAG/$KIND
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH_SIZE,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
     --experiment_name $TAG \
@@ -262,11 +274,9 @@ evaluate_pseudo_masks() {
     --num_workers $WORKERS_INFER;
 }
 
-# LR=0.1  # LR from config/dataset.sh
-MOMENTUM=0
-NESTEROV=false
 MODE=fix
 TRAINABLE_STEM=false
+TRAINABLE_STAGE4=false
 TRAINABLE_BONE=true
 
 ## Pascal VOC 2012
@@ -279,27 +289,15 @@ ARCHITECTURE=resnest101
 ARCH=rs101
 # RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
-VALIDATE_MAX_STEPS=256  # 20%*40504/32
 
-
-# DOMAIN_TRAIN=train_aug
-# DOMAIN_TRAIN_UNLABELED=train_aug
-DOMAIN_TRAIN_UNLABELED=$DOMAIN_TRAIN
-SAMPLER=default
-
-EPOCHS=15
-# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-MAX_STEPS=378   # ceil(10% of (82783 (coco14 train samples) / 32)).
-BATCH_SIZE=32
-ACCUMULATE_STEPS=1
-LABELSMOOTHING=0
+LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
 AUGMENT=classmix
 # AUGMENT=cutmix
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+WARMUP_EPOCHS=0  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_FG=0.20
 C2S_BG=0.05
@@ -310,7 +308,7 @@ W_U=1
 
 EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH_SIZE}-$AUGMENT-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
@@ -331,4 +329,3 @@ PRED_DIR=$PRED_ROOT@train/$KIND
 # PRED_DIR=$PRED_ROOT@val/$KIND
 # DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
 # DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
-

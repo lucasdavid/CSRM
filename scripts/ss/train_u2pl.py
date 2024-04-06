@@ -23,7 +23,7 @@ from tools.ai.optim_utils import get_optimizer, linear_schedule
 from tools.ai.torch_utils import *
 from tools.general import wandb_utils
 from tools.general.io_utils import create_directory, str2bool
-from tools.general.time_utils import Timer
+from tools.general.time_utils import *
 from tools.ai.augment_utils import *
 
 parser = argparse.ArgumentParser()
@@ -47,6 +47,7 @@ parser.add_argument('--sampler', default="default", type=str, choices=["default"
 parser.add_argument('--architecture', default='resnet50', type=str)
 parser.add_argument('--mode', default='normal', type=str, choices=["normal", "fix"])
 parser.add_argument('--trainable-stem', default=True, type=str2bool)
+parser.add_argument('--trainable-stage4', default=True, type=str2bool)
 parser.add_argument('--trainable-backbone', default=True, type=str2bool)
 parser.add_argument('--use_sal_head', default=False, type=str2bool)
 parser.add_argument('--use_rep_head', default=True, type=str2bool)
@@ -113,6 +114,17 @@ except KeyError:
 GPUS = GPUS.split(",")
 GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
+TRACKERS = {
+  "pseudo-labels-teacher": BlockTimeTracker("Pseudo-labels Teacher Forward"),
+  "pseudo-labels-gen": BlockTimeTracker("Pseudo-labels Gen"),
+  "student-forward": BlockTimeTracker("Student Forward"),
+  "teacher-forward": BlockTimeTracker("Teacher Forward"),
+  "loss-classification": BlockTimeTracker("Classification Loss C (ML Soft Margin)"),
+  "loss-segmentation": BlockTimeTracker("Segmentation Loss C2S (CE)"),
+  "loss-mp": BlockTimeTracker("Mutual Promotion Loss S2C (CE)"),
+  "loss-unsup": BlockTimeTracker("Unsupervised Loss U (KD)"),
+  "loss-contra": BlockTimeTracker("Contrastive Loss (U2PL)"),
+}
 
 
 def train_u2pl(args, wb_run, model_path):
@@ -169,6 +181,7 @@ def train_u2pl(args, wb_run, model_path):
     dilated=args.dilated,
     use_group_norm=args.use_gn,
     trainable_stem=args.trainable_stem,
+    trainable_stage4=args.trainable_stage4,
     trainable_backbone=args.trainable_backbone,
     use_sal_head=args.use_sal_head,
     use_rep_head=args.use_rep_head,
@@ -190,7 +203,6 @@ def train_u2pl(args, wb_run, model_path):
   log_model("CSRM", model, args)
 
   param_groups, param_names = model.get_parameter_groups(with_names=True)
-  model = model.to(DEVICE)
   model.train()
 
   teacher = deepcopy(model)
@@ -201,6 +213,9 @@ def train_u2pl(args, wb_run, model_path):
     print(f"GPUs={GPUS_COUNT}")
     model = torch.nn.DataParallel(model)
     teacher = torch.nn.DataParallel(teacher)
+
+  model = model.to(DEVICE)
+  teacher = teacher.to(DEVICE)
 
   # build class-wise memory bank
   num_classes_segm = tls.segmentation_info.num_classes
@@ -242,7 +257,7 @@ def train_u2pl(args, wb_run, model_path):
   miou_best = 0
 
   try:
-    if args.first_epoch == 0:
+    if args.first_epoch == 0 and args.validate:
       print("Checking the initial mIoU from pretrained CAM generating model...")
       miou_best, _ = valid_loop(model, valid_loader, tls, 0, optimizer, miou_best=0)
 
@@ -265,6 +280,8 @@ def train_u2pl(args, wb_run, model_path):
           w_s2c = linear_schedule(epoch, args.max_epoch, 0.1, 1.0, 1.0)
           w_u = args.w_u
           w_contra = args.w_contra
+
+        trackers_enabled = step >= 4
 
         with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
           loss, metrics = train_step(
@@ -294,28 +311,29 @@ def train_u2pl(args, wb_run, model_path):
             use_sal_head=args.use_sal_head,
             warmup_epochs=args.warmup_epochs,
             max_epochs=args.max_epoch,
+            trackers_enabled=trackers_enabled,
           )
 
         scaler.scale(loss / args.accumulate_steps).backward()
 
         if (step + 1) % args.accumulate_steps == 0:
-          if args.grad_max_norm:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_max_norm)
-          scaler.step(optimizer)
-          scaler.update()
-          optimizer.zero_grad()
+            if args.grad_max_norm:
+              scaler.unscale_(optimizer)
+              torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_max_norm)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-          with torch.no_grad():
-            if epoch <= args.warmup_epochs:
-              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                t_params.copy_(s_params)
-            else:
-              ema_decay_origin = 0.99
-              warmup_steps = args.warmup_epochs * step_val / args.accumulate_steps
-              ema_decay = min(1 - 1 / (1 + optimizer.global_step - warmup_steps), ema_decay_origin)
-              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
+            with torch.no_grad():
+              if epoch <= args.warmup_epochs:
+                for t_params, s_params in zip(teacher.parameters(), model.parameters()):
+                  t_params.copy_(s_params)
+              else:
+                ema_decay_origin = 0.99
+                warmup_steps = args.warmup_epochs * step_val / args.accumulate_steps
+                ema_decay = min(1 - 1 / (1 + optimizer.global_step - warmup_steps), ema_decay_origin)
+                for t_params, s_params in zip(teacher.parameters(), model.parameters()):
+                  t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
 
         train_meter.update({m: v.item() for m, v in metrics.items()})
 
@@ -350,8 +368,10 @@ def train_u2pl(args, wb_run, model_path):
           }
           wandb.log({f"train/{k}": v for k, v in data.items()}, commit=not do_validation)
           print(
-            f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} loss_u={loss_u:.3f} loss_contra={loss_contra:.3f} lr={lr:.3f}"
+            f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} "
+            f"loss_u={loss_u:.3f} loss_contra={loss_contra:.3f} lr={lr:.3f}"
           )
+          print(*(t.description() for t in TRACKERS.values()), sep="\n")
 
         if do_validation:
           # Interrupt epoch in case `max_steps < len(train_loader)`.
@@ -381,7 +401,7 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
   print(f"[Epoch {epoch}/{args.max_epoch}]",
         *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
           for m, v in metric_results.items()))
-  
+
   miou_now = metric_results["priors/miou"]
   improved = miou_now > miou_best
   if improved:
@@ -418,6 +438,7 @@ def train_step(
   warmup_epochs: int = 0,
   max_epochs: int = 15,
   low_entropy_threshold: int = 20,
+  trackers_enabled: bool = True,
 ):
   _, images_l, true_labels_l, true_masks_l = batch_l
   _, images_u, true_labels_u, true_masks_u = batch_u
@@ -426,204 +447,223 @@ def train_step(
   criterion_c, criterion_c2s = criterions
   memobank, queue_size, queue_ptrlis, prototype = memory
 
-  images = torch.cat((images_l, images_u)).to(DEVICE)
+  images_cpu = torch.cat((images_l, images_u))
+  images = images_cpu.to(DEVICE)
   true_labels = torch.cat((true_labels_l, true_labels_u))
-  true_masks = torch.cat((true_masks_l, true_masks_u))
 
   # Generate Pseudo-labels.
   teacher.eval()
-  teacher_outputs = teacher(images, with_cam=True, with_saliency=False, with_rep=False)
-  features_cls_t = teacher_outputs["features_c"].detach()
-  logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
+  with torch.no_grad():
+    with BlockTimer.scope("pseudo-labels-teacher", trackers_enabled):
+      teacher_outputs = teacher(images, with_cam=True, with_saliency=False, with_rep=False)
+      features_cls_t = teacher_outputs["features_c"].detach()
+      logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
 
-  features_cls_t_l, features_cls_t_u = features_cls_t[:NL], features_cls_t[NL:]
-  # rep_t = teacher_outputs["rep"].detach()
-  # if use_sal_head:
-  #   logit_sal_t = teacher_outputs["masks_sal_large"].detach()
-  # else:
-  #   logit_sal_t = logit_seg_large_t[:, bg_class:bg_class + 1]
-  del teacher_outputs
+      features_cls_t_l, features_cls_t_u = features_cls_t[:NL], features_cls_t[NL:]
+      # rep_t = teacher_outputs["rep"].detach()
+      # if use_sal_head:
+      #   logit_sal_t = teacher_outputs["masks_sal_large"].detach()
+      # else:
+      #   logit_sal_t = logit_seg_large_t[:, bg_class:bg_class + 1]
+      del teacher_outputs
 
-  if c2s_mode == "gt":  # only a sanity test.
-    pseudo_masks = true_masks
-  else:
-    pseudo_masks = get_pseudo_label(
-      images,
-      true_labels,
-      cams=features_cls_t,
-      masks_bg=logit_seg_large_t[:, bg_class_seg],
-      thresholds=thresholds,
-      resize_align_corners=True,
-      mode=c2s_mode,
-      c2s_sigma=c2s_sigma,
-    )
+    with BlockTimer.scope("pseudo-labels-gen", trackers_enabled):
+      if c2s_mode == "gt":  # only a sanity test.
+        true_masks = torch.cat((true_masks_l, true_masks_u))
+        pseudo_masks = true_masks
+      else:
+        pseudo_masks = get_pseudo_label(
+          images_cpu,
+          true_labels,
+          cams=features_cls_t,
+          masks_bg=logit_seg_large_t[:, bg_class_seg],
+          thresholds=thresholds,
+          resize_align_corners=True,
+          mode=c2s_mode,
+          c2s_sigma=c2s_sigma,
+        )
 
-  if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
-    mix = "cutmix" if "cutmix" in augment else "classmix"
-    (
-      images,
-      true_labels,
-      pseudo_masks,
-      logit_seg_large_t,
-      # logit_sal_t,
-    ) = data_utils.mixaug(
-      images,
-      true_labels,
-      pseudo_masks,
-      logit_seg_large_t.cpu(),
-      # logit_sal_t.cpu(),
-      beta=1.0,
-      k=1,
-      mix=mix,
-      ignore_class=bg_class_seg,
-      bg_in_labels=bg_class_clf is not None,
-    )
+      if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
+        mix = "cutmix" if "cutmix" in augment else "classmix"
+        (
+          images,
+          true_labels,
+          pseudo_masks,
+          logit_seg_large_t,
+          # logit_sal_t,
+        ) = data_utils.mixaug(
+          images,
+          true_labels,
+          pseudo_masks,
+          logit_seg_large_t.cpu(),
+          # logit_sal_t,
+          beta=1.0,
+          k=1,
+          mix=mix,
+          ignore_class=bg_class_seg,
+          bg_in_labels=bg_class_clf is not None,
+        )
 
-    logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
-    # logit_sal_t = logit_sal_t.float().to(DEVICE)
-    # rep_t = rep_t.float().to(DEVICE)
+        logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
+        # logit_sal_t = logit_sal_t.float()
+        # rep_t = rep_t.float()
 
-  pseudo_masks_l, pseudo_masks_u = pseudo_masks[:NL], pseudo_masks[NL:]
-  logit_seg_large_l_t, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
-  label_seg_large_u_t = logit_seg_large_u_t.argmax(dim=1)
+      pseudo_masks_l, pseudo_masks_u = pseudo_masks[:NL], pseudo_masks[NL:]
+      pseudo_masks_l = pseudo_masks_l.to(DEVICE)
+
+      logit_seg_large_l_t, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
+      label_seg_large_u_t = logit_seg_large_u_t.argmax(dim=1)
 
   # Student Forward
-  outputs = model(images, with_saliency=True, with_mask=True, with_rep=True)
-  logit_seg_large = outputs["masks_seg_large"]
-  if use_sal_head:
-    logit_sal = outputs["masks_sal_large"]
-  else:
-    logit_sal = logit_seg_large[:, bg_class_seg].unsqueeze(1).detach()
+  with BlockTimer.scope("student-forward", trackers_enabled):
+    outputs = model(images, with_saliency=True, with_mask=True, with_rep=True)
+    logit_seg_large = outputs["masks_seg_large"]
+    if use_sal_head:
+      logit_sal = outputs["masks_sal_large"]
+    else:
+      logit_sal = logit_seg_large[:, bg_class_seg].unsqueeze(1).detach()
 
-  logit_seg_large_l, logit_seg_large_u = logit_seg_large[:NL], logit_seg_large[NL:]
+    logit_seg_large_l, logit_seg_large_u = logit_seg_large[:NL], logit_seg_large[NL:]
 
   # Teacher Forward
-  teacher.train()
-  with torch.no_grad():
-    teacher_outputs = teacher(images)
-    pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"]
-    prob_all_t = F.softmax(pred_all_t, dim=1)
-    prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
-    logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
-    prob_large_u_t = F.softmax(logit_seg_large_u_t, dim=1)
-    del teacher_outputs
+  with BlockTimer.scope("teacher-forward", trackers_enabled):
+    teacher.train()
+    with torch.no_grad():
+      teacher_outputs = teacher(images)
+      pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"]
+      prob_all_t = F.softmax(pred_all_t, dim=1)
+      prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
 
-  # (1) Classification loss.
-  logit_c = outputs["logits_c"]
-  # logit_c_l, logit_c_u = outputs["logits_c"][:num_labeled], outputs["logits_c"][num_labeled:]
-  loss_c = criterion_c(logit_c, label_smoothing(true_labels, ls).to(DEVICE))
+      logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
+      prob_large_u_t = F.softmax(logit_seg_large_u_t, dim=1)
+      entropy_large_u_t = -torch.sum(prob_large_u_t * torch.log(prob_large_u_t + 1e-10), dim=1)
+      del teacher_outputs
+
+  with BlockTimer.scope("loss-classification", trackers_enabled):
+    # (1) Classification loss.
+    logit_c = outputs["logits_c"]
+    # logit_c_l, logit_c_u = outputs["logits_c"][:num_labeled], outputs["logits_c"][num_labeled:]
+    loss_c = criterion_c(logit_c, label_smoothing(true_labels, ls).to(DEVICE))
 
   # (2) Segmentation loss.
-  pixels_un = pseudo_masks_l == 255
-  pixels_bg = pseudo_masks_l == bg_class_seg
-  pixels_fg = ~(pixels_un | pixels_bg)
-  samples_valid = pixels_fg.sum((1, 2)) > 0
+  with BlockTimer.scope("loss-segmentation", trackers_enabled):
+    pixels_un = pseudo_masks_l == 255
+    pixels_bg = pseudo_masks_l == bg_class_seg
+    pixels_fg = ~(pixels_un | pixels_bg)
+    samples_valid = pixels_fg.sum((1, 2)) > 0
 
-  conf_pixels_c2s = (~pixels_un.cpu()).float().mean()
+    conf_pixels_c2s = (~pixels_un.cpu()).float().mean()
 
-  pseudo_masks_l = pseudo_masks_l.to(DEVICE)
-
-  if samples_valid.sum() == 0:
-    # All label maps have only bg or void class.
-    loss_c2s = torch.zeros_like(loss_c)
-  else:
-    loss_c2s = criterion_c2s(logit_seg_large_l[samples_valid], pseudo_masks_l[samples_valid])
+    if samples_valid.sum() == 0:
+      # All label maps have only bg or void class.
+      loss_c2s = torch.zeros_like(loss_c)
+    else:
+      loss_c2s = criterion_c2s(logit_seg_large_l[samples_valid], pseudo_masks_l[samples_valid])
 
   # (3) Mutual Promotion Branches Consistency loss.
-  if not w_s2c:
-    loss_s2c = torch.zeros_like(loss_c)
-    conf_pixels_s2c = torch.zeros_like(conf_pixels_c2s)
-  else:
-    feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
-    masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
+  with BlockTimer.scope("loss-mp", trackers_enabled):
+    if not w_s2c:
+      loss_s2c = torch.zeros_like(loss_c)
+      conf_pixels_s2c = torch.zeros_like(conf_pixels_c2s)
+    else:
+      feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
+      masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
 
-    probs_seg_large_t = torch.softmax(logit_seg_large_t, dim=1)
-    conf_pixels_s2c, pmasks_sal = probs_seg_large_t.max(1)
+      probs_seg_large_t = torch.softmax(logit_seg_large_t, dim=1)
+      conf_pixels_s2c, pmasks_sal = probs_seg_large_t.max(1)
 
-    conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
-    pmasks_sal[~conf_pixels_s2c] = 255
+      conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
+      pmasks_sal[~conf_pixels_s2c] = 255
 
-    loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(DEVICE))
+      loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(DEVICE))
 
-    conf_pixels_s2c = conf_pixels_s2c.float().mean()
+      conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
   # (4) Unsupervised Loss.
-  if not w_u:
-    loss_u = torch.zeros_like(loss_c)
-  else:
-    drop_percent = 80
-    percent_unreliable = (100 - drop_percent) * (1 - epoch / max_epochs)
-    drop_percent = 100 - percent_unreliable
-    loss_u = u2pl.compute_unsupervised_loss(
-      logit_seg_large_u,
-      label_seg_large_u_t.clone(),
-      drop_percent,
-      logit_seg_large_u_t.detach(),
-    )
+  with BlockTimer.scope("loss-unsup", trackers_enabled):
+    if not w_u:
+      loss_u = torch.zeros_like(loss_c)
+    else:
+      drop_percent = 80
+      percent_unreliable = (100 - drop_percent) * (1 - epoch / max_epochs)
+      drop_percent = 100 - percent_unreliable
+      loss_u = u2pl.compute_unsupervised_loss(
+        logit_seg_large_u,
+        label_seg_large_u_t.clone(),
+        drop_percent,
+        entropy_large_u_t.detach(),
+      )
 
   # (5) Contrastive loss.
-  if not w_contra:
-    loss_contra = torch.zeros_like(loss_c)
-  else:
-    pred_all = outputs["masks_seg"]
-    rep_all = outputs["rep"]
+  with BlockTimer.scope("loss-contra", trackers_enabled):
+    if not w_contra:
+      loss_contra = torch.zeros_like(loss_c)
+    else:
+      pred_all = outputs["masks_seg"]
+      rep_all = outputs["rep"]
+      del outputs
 
-    alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
+      alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
 
-    with torch.no_grad():
-      entropy = -torch.sum(prob_large_u_t * torch.log(prob_large_u_t + 1e-10), dim=1)
-      low_thresh = np.percentile(entropy[label_seg_large_u_t != 255].cpu().numpy().flatten(), alpha_t)
-      low_entropy_mask = (entropy < low_thresh) & (label_seg_large_u_t != 255)
+      with torch.no_grad():
+        valid_mask = label_seg_large_u_t != 255
 
-      high_thresh = np.percentile(entropy[label_seg_large_u_t != 255].cpu().numpy().flatten(), 100 - alpha_t)
-      high_entropy_mask = (entropy >= high_thresh) & (label_seg_large_u_t != 255)
+        # low_thresh = np.percentile(entropy_large_u_t[valid_mask].cpu().numpy().flatten(), alpha_t)
+        low_thresh = torch.quantile(entropy_large_u_t[valid_mask], alpha_t / 100.)
+        low_entropy_mask = (entropy_large_u_t < low_thresh) & valid_mask
 
-      low_mask_all = torch.cat((
-        (pseudo_masks_l.unsqueeze(1) != 255).float(),
-        low_entropy_mask.unsqueeze(1),
-      ))
+        # high_thresh = np.percentile(entropy_large_u_t[valid_mask].cpu().numpy().flatten(), 100 - alpha_t)
+        high_thresh = torch.quantile(entropy_large_u_t[valid_mask], 1 - alpha_t / 100)
+        high_entropy_mask = (entropy_large_u_t >= high_thresh) & valid_mask
 
-      low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
+        pseudo_entropy_mask = (pseudo_masks_l.unsqueeze(1) != 255).float()
 
-      high_mask_all = torch.cat((
-        (pseudo_masks_l.unsqueeze(1) != 255).float(),
-        high_entropy_mask.unsqueeze(1),
-      ))
-      high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
+        low_mask_all = torch.cat((
+          pseudo_entropy_mask,
+          low_entropy_mask.unsqueeze(1),
+        ))
 
-      # down sample and concat
-      label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest")
-      label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest")
+        low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
 
-    cfg_contra = dict(
-      negative_high_entropy=True,
-      low_rank=3,
-      high_rank=20,
-      current_class_threshold=0.3,
-      current_class_negative_threshold=1,
-      unsupervised_entropy_ignore=80,
-      low_entropy_threshold=20,
-      num_negatives=50,
-      num_queries=256,
-      temperature=0.5,
-    )
+        high_mask_all = torch.cat((
+          pseudo_entropy_mask,
+          high_entropy_mask.unsqueeze(1),
+        ))
+        high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
 
-    new_keys, loss_contra = u2pl.compute_contra_memobank_loss(
-      rep_all,
-      label_l_small.long(),
-      label_u_small.long(),
-      prob_l_t.detach(),
-      prob_u_t.detach(),
-      low_mask_all,
-      high_mask_all,
-      cfg_contra,
-      memobank,
-      queue_ptrlis,
-      queue_size,
-      rep_all_t.detach(),
-    )
+        # down sample and concat
+        label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest")
+        label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest")
 
-  loss = w_c * loss_c + w_c2s * loss_c2s + w_s2c * loss_s2c + w_u * loss_u + w_contra * loss_contra
+      cfg_contra = dict(
+        negative_high_entropy=True,
+        low_rank=3,
+        high_rank=20,
+        current_class_threshold=0.3,
+        current_class_negative_threshold=1,
+        unsupervised_entropy_ignore=80,
+        low_entropy_threshold=20,
+        num_negatives=50,
+        num_queries=256,
+        temperature=0.5,
+      )
+
+      new_keys, loss_contra = u2pl.compute_contra_memobank_loss(
+        rep_all,
+        label_l_small.long(),
+        label_u_small.long(),
+        prob_l_t.detach(),
+        prob_u_t.detach(),
+        low_mask_all,
+        high_mask_all,
+        cfg_contra,
+        memobank,
+        queue_ptrlis,
+        queue_size,
+        rep_all_t.detach(),
+      )
+
+    loss = w_c * loss_c + w_c2s * loss_c2s + w_s2c * loss_s2c + w_u * loss_u + w_contra * loss_contra
 
   metrics = {
     "loss": loss,

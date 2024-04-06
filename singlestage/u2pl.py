@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 def label_onehot(inputs, num_segments):
     batch_size, im_h, im_w = inputs.shape
-    outputs = torch.zeros((num_segments, batch_size, im_h, im_w)).cuda()
+    outputs = torch.zeros((num_segments, batch_size, im_h, im_w)).to(inputs.device)
 
     inputs_temp = inputs.clone()
     inputs_temp[inputs == 255] = 0
@@ -65,7 +65,7 @@ def synchronize():
 @torch.no_grad()
 def dequeue_and_enqueue(keys, queue, queue_ptr, queue_size):
   # gather keys before updating queue
-  keys = keys.detach().clone().cpu()
+  keys = keys.detach().cpu().clone()
   # TODO: restore this when dist.
   # gathered_list = gather_together(keys)
   # keys = torch.cat(gathered_list, dim=0).cuda()
@@ -74,7 +74,7 @@ def dequeue_and_enqueue(keys, queue, queue_ptr, queue_size):
 
   ptr = int(queue_ptr)
 
-  queue[0] = torch.cat((queue[0], keys.cpu()), dim=0)
+  queue[0] = torch.cat((queue[0], keys), dim=0)
   if queue[0].shape[0] >= queue_size:
     queue[0] = queue[0][-queue_size:, :]
     ptr = queue_size
@@ -86,13 +86,14 @@ def dequeue_and_enqueue(keys, queue, queue_ptr, queue_size):
   return batch_size
 
 
-def compute_unsupervised_loss(predict, target, percent, pred_teacher):
+def compute_unsupervised_loss(predict, target, percent, entropy_teacher):
   batch_size, num_class, h, w = predict.shape
 
   with torch.no_grad():
     # drop pixels with high entropy
-    prob = torch.softmax(pred_teacher, dim=1)
-    entropy = -torch.sum(prob * torch.log(prob + 1e-10), dim=1)
+    # prob = torch.softmax(pred_teacher, dim=1)
+    # entropy = -torch.sum(prob * torch.log(prob + 1e-10), dim=1)
+    entropy = entropy_teacher
 
     thresh = np.percentile(entropy[target != 255].detach().cpu().numpy().flatten(), percent)
     thresh_mask = entropy.ge(thresh).bool() * (target != 255).bool()
@@ -203,31 +204,31 @@ def compute_contra_memobank_loss(
       return momentum_prototype, new_keys, torch.tensor(0.0) * rep.sum()
 
   else:
-    reco_loss = torch.tensor(0.0).cuda()
+    reco_loss = torch.tensor(0.0).to(rep.device)
     seg_proto = torch.cat(seg_proto_list)  # shape: [valid_seg, 256]
     valid_seg = len(seg_num_list)  # number of valid classes
 
-    prototype = torch.zeros((prob_indices_l.shape[-1], num_queries, 1, num_feat)).cuda()
+    # prototype = torch.zeros((prob_indices_l.shape[-1], num_queries, 1, num_feat)).to(rep.device)
 
     for i in range(valid_seg):
-      if (len(seg_feat_low_entropy_list[i]) > 0 and memobank[valid_classes[i]][0].shape[0] > 0):
-        # select anchor pixel
-        seg_low_entropy_idx = torch.randint(len(seg_feat_low_entropy_list[i]), size=(num_queries,))
-        anchor_feat = (seg_feat_low_entropy_list[i][seg_low_entropy_idx].clone().cuda())
-      else:
+      if not (len(seg_feat_low_entropy_list[i]) > 0 and memobank[valid_classes[i]][0].shape[0] > 0):
         # in some rare cases, all queries in the current query class are easy
         reco_loss = reco_loss + 0 * rep.sum()
         continue
 
+      # select anchor pixel
+      seg_low_entropy_idx = torch.randint(len(seg_feat_low_entropy_list[i]), size=(num_queries,))
+      anchor_feat = (seg_feat_low_entropy_list[i][seg_low_entropy_idx].clone().to(rep.device))
+
       # apply negative key sampling from memory bank (with no gradients)
       with torch.no_grad():
-        negative_feat = memobank[valid_classes[i]][0].clone().cuda()
+        negative_feat = memobank[valid_classes[i]][0].clone()  # .to(rep.device)
 
         high_entropy_idx = torch.randint(len(negative_feat), size=(num_queries * num_negatives,))
         negative_feat = negative_feat[high_entropy_idx]
         negative_feat = negative_feat.reshape(num_queries, num_negatives, num_feat)
         positive_feat = (
-          seg_proto[i].unsqueeze(0).unsqueeze(0).repeat(num_queries, 1, 1).cuda()
+          seg_proto[i].unsqueeze(0).unsqueeze(0).repeat(num_queries, 1, 1)  # .to(rep.device)
         )  # (num_queries, 1, num_feat)
 
         if momentum_prototype is not None:
@@ -235,15 +236,17 @@ def compute_contra_memobank_loss(
             ema_decay = min(1 - 1 / i_iter, 0.999)
             positive_feat = (1 - ema_decay) * positive_feat + ema_decay * momentum_prototype[valid_classes[i]]
 
-          prototype[valid_classes[i]] = positive_feat.clone()
+          # prototype[valid_classes[i]] = positive_feat.clone()
 
         all_feat = torch.cat((positive_feat, negative_feat), dim=1)  # (num_queries, 1 + num_negative, num_feat)
 
-      seg_logits = torch.cosine_similarity(anchor_feat.unsqueeze(1), all_feat, dim=2)
+      seg_logits = torch.cosine_similarity(anchor_feat.unsqueeze(1), all_feat.to(anchor_feat.device), dim=2)
 
-      reco_loss = reco_loss + F.cross_entropy(seg_logits / temp, torch.zeros(num_queries).long().cuda())
+      target = torch.zeros(num_queries, dtype=torch.int64, device=seg_logits.device)
+      reco_loss = reco_loss + F.cross_entropy(seg_logits / temp, target)
 
     if momentum_prototype is None:
       return new_keys, reco_loss / valid_seg
     else:
-      return prototype, new_keys, reco_loss / valid_seg
+      # return prototype, new_keys, reco_loss / valid_seg
+      return None, new_keys, reco_loss / valid_seg
