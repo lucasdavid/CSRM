@@ -522,6 +522,7 @@ def train_step(
       pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"].detach()
       prob_all_t = F.softmax(pred_all_t, dim=1)
       prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
+      entropy_u_t = -torch.sum(prob_u_t * torch.log(prob_u_t + 1e-10), dim=1)
 
       logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
       prob_large_u_t = F.softmax(logit_seg_large_u_t, dim=1)
@@ -595,34 +596,34 @@ def train_step(
       alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
 
       with torch.no_grad():
-        valid_mask = label_seg_large_u_t != 255
+        low_res_masks = F.interpolate(
+          torch.cat((pseudo_masks_l.float(), label_seg_large_u_t.float())).unsqueeze(1),
+          size=pred_all.shape[2:],
+          mode="nearest",
+        ).squeeze(1).long()
 
-        # low_thresh = np.percentile(entropy_large_u_t[valid_mask].cpu().numpy().flatten(), alpha_t)
-        low_thresh = torch.quantile(entropy_large_u_t[valid_mask], alpha_t / 100.)
-        low_entropy_mask = (entropy_large_u_t < low_thresh) & valid_mask
+        pseudo_masks_l = low_res_masks[:NL]
+        label_seg_u_t = low_res_masks[NL:]
+        valid_mask = label_seg_u_t != 255
 
-        # high_thresh = np.percentile(entropy_large_u_t[valid_mask].cpu().numpy().flatten(), 100 - alpha_t)
-        high_thresh = torch.quantile(entropy_large_u_t[valid_mask], 1 - alpha_t / 100)
-        high_entropy_mask = (entropy_large_u_t >= high_thresh) & valid_mask
+        # low_thresh = np.percentile(entropy_u_t[valid_mask].cpu().numpy().flatten(), alpha_t)
+        low_thresh = torch.quantile(entropy_u_t[valid_mask], alpha_t / 100.)
+        low_entropy_mask = (entropy_u_t < low_thresh) & valid_mask
 
-        pseudo_entropy_mask = (pseudo_masks_l.unsqueeze(1) != 255).float()
+        # high_thresh = np.percentile(entropy_u_t[valid_mask].cpu().numpy().flatten(), 100 - alpha_t)
+        high_thresh = torch.quantile(entropy_u_t[valid_mask], 1 - alpha_t / 100)
+        high_entropy_mask = (entropy_u_t >= high_thresh) & valid_mask
 
-        low_mask_all = torch.cat((
-          pseudo_entropy_mask,
-          low_entropy_mask.unsqueeze(1),
-        ))
+        pseudo_entropy_mask = (pseudo_masks_l != 255)
 
-        low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest").bool()  # down sample
-
-        high_mask_all = torch.cat((
-          pseudo_entropy_mask,
-          high_entropy_mask.unsqueeze(1),
-        ))
-        high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest").bool()  # down sample
+        low_mask_all = torch.cat((pseudo_entropy_mask, low_entropy_mask)).unsqueeze(1)
+        high_mask_all = torch.cat((pseudo_entropy_mask, high_entropy_mask)).unsqueeze(1)
 
         # down sample and concat
-        label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest").int()
-        label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest").int()
+        label_l_small = u2pl.label_onehot(
+          F.interpolate(pseudo_masks_l.unsqueeze(1), size=pred_all.shape[2:], mode="nearest").squeeze(1).long(), num_classes)
+        label_u_small = u2pl.label_onehot(
+          F.interpolate(label_seg_u_t.unsqueeze(1), size=pred_all.shape[2:], mode="nearest").squeeze(1).long(), num_classes)
 
       cfg_contra = dict(
         negative_high_entropy=True,

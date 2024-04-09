@@ -87,14 +87,14 @@ LR_POLY_POWER=0.9
 GRAD_MAX_NORM=1.
 
 MIXED_PRECISION=true
-PERFORM_VALIDATION=false
+PERFORM_VALIDATION=true
 PROGRESS=true
 
 ## Augmentation
 AUGMENT=collorjitter
 CUTMIX=0.5
 MIXUP=0.5
-# LABELSMOOTHING=0
+LABELSMOOTHING=0.1
 
 # Evaluation
 MIN_TH=0.05
@@ -226,8 +226,9 @@ train_u2pl() {
     --validate_max_steps $VALIDATE_MAX_STEPS \
     --validate_thresholds $VALIDATE_THRESHOLDS \
     --device $DEVICE \
-    --num_workers $WORKERS_TRAIN \
-    --restore $RESTORE;
+    --num_workers $WORKERS_TRAIN;
+    #  \
+    # --restore $RESTORE;
 }
 
 inference() {
@@ -290,14 +291,13 @@ ARCH=rs101
 # RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
 
-LABELSMOOTHING=0.1
 # AUGMENT=colorjitter # none for DeepGlobe
 AUGMENT=classmix
 # AUGMENT=cutmix
 
 S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-WARMUP_EPOCHS=0  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_FG=0.20
 C2S_BG=0.05
