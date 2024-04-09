@@ -29,15 +29,15 @@ if [[ "`hostname`" == "sdumont"* ]]; then
   WORK_DIR=$SCRATCH/single-stage
 else
   ENV=local
-  WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
+  WORK_DIR=$HOME/workspace/repos/research/wsss/wsss-csrm
 fi
 
 echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-# DATASET=voc12  # Pascal VOC 2012
-DATASET=coco14  # MS COCO 2014
+DATASET=voc12  # Pascal VOC 2012
+# DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -69,7 +69,7 @@ MOMENTUM=0.9
 NESTEROV=true
 FIRST_EPOCH=0
 EPOCHS=15
-BATCH=16
+BATCH=32
 ACCUMULATE_STEPS=1
 
 # MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.

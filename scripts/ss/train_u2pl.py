@@ -114,17 +114,6 @@ except KeyError:
 GPUS = GPUS.split(",")
 GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
-TRACKERS = {
-  "pseudo-labels-teacher": BlockTimeTracker("Pseudo-labels Teacher Forward"),
-  "pseudo-labels-gen": BlockTimeTracker("Pseudo-labels Gen"),
-  "student-forward": BlockTimeTracker("Student Forward"),
-  "teacher-forward": BlockTimeTracker("Teacher Forward"),
-  "loss-classification": BlockTimeTracker("Classification Loss C (ML Soft Margin)"),
-  "loss-segmentation": BlockTimeTracker("Segmentation Loss C2S (CE)"),
-  "loss-mp": BlockTimeTracker("Mutual Promotion Loss S2C (CE)"),
-  "loss-unsup": BlockTimeTracker("Unsupervised Loss U (KD)"),
-  "loss-contra": BlockTimeTracker("Contrastive Loss (U2PL)"),
-}
 
 
 def train_u2pl(args, wb_run, model_path):
@@ -371,7 +360,7 @@ def train_u2pl(args, wb_run, model_path):
             f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} "
             f"loss_u={loss_u:.3f} loss_contra={loss_contra:.3f} lr={lr:.3f}"
           )
-          print(*(t.description() for t in TRACKERS.values()), sep="\n")
+          print(*(t.description() for t in BlockTimer.trackers()), sep="\n")
 
         if do_validation:
           # Interrupt epoch in case `max_steps < len(train_loader)`.
@@ -530,7 +519,7 @@ def train_step(
     teacher.train()
     with torch.no_grad():
       teacher_outputs = teacher(images)
-      pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"]
+      pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"].detach()
       prob_all_t = F.softmax(pred_all_t, dim=1)
       prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
 
@@ -623,17 +612,17 @@ def train_step(
           low_entropy_mask.unsqueeze(1),
         ))
 
-        low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
+        low_mask_all = F.interpolate(low_mask_all, size=pred_all.shape[2:], mode="nearest").bool()  # down sample
 
         high_mask_all = torch.cat((
           pseudo_entropy_mask,
           high_entropy_mask.unsqueeze(1),
         ))
-        high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest")  # down sample
+        high_mask_all = F.interpolate(high_mask_all, size=pred_all.shape[2:], mode="nearest").bool()  # down sample
 
         # down sample and concat
-        label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest")
-        label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest")
+        label_l_small = F.interpolate(u2pl.label_onehot(pseudo_masks_l, num_classes), size=pred_all.shape[2:], mode="nearest").int()
+        label_u_small = F.interpolate(u2pl.label_onehot(label_seg_large_u_t, num_classes), size=pred_all.shape[2:], mode="nearest").int()
 
       cfg_contra = dict(
         negative_high_entropy=True,
@@ -650,8 +639,8 @@ def train_step(
 
       new_keys, loss_contra = u2pl.compute_contra_memobank_loss(
         rep_all,
-        label_l_small.long(),
-        label_u_small.long(),
+        label_l_small,
+        label_u_small,
         prob_l_t.detach(),
         prob_u_t.detach(),
         low_mask_all,
