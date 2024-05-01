@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=01:00:00
+#SBATCH --time=48:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -36,12 +36,16 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-DATASET=voc12  # Pascal VOC 2012
-# DATASET=coco14  # MS COCO 2014
+# DATASET=voc12  # Pascal VOC 2012
+DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
 . $WORK_DIR/runners/config/dataset.sh
+
+export 'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256'
+
+$PIP install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
 cd $WORK_DIR
 export PYTHONPATH=$(pwd)
@@ -52,30 +56,23 @@ export PYTHONPATH=$(pwd)
 ### Priors
 ARCH=rs269
 ARCHITECTURE=resnest269
-TRAINABLE_STEM=true
+MODE=fix
+TRAINABLE_STEM=false
+TRAINABLE_STAGE4=false
+TRAINABLE_BONE=true
 TRAINABLE_BONE=true
 DILATED=false
 USE_SAL_HEAD=false
 USE_REP_HEAD=true
-MODE=normal
-
-LR=0.007  # voc12
-# LR=0.004  # coco14
-# LR=0.001  # deepglobe
 
 # Training
 OPTIMIZER=sgd  # sgd,lion,adam
-MOMENTUM=0.9
-NESTEROV=true
+MOMENTUM=0
+NESTEROV=false
 FIRST_EPOCH=0
 EPOCHS=15
 BATCH=32
 ACCUMULATE_STEPS=1
-
-# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-MAX_STEPS=378   # ceil(10% of (82783 (coco14 train samples) / 32)).
-
-VALIDATE_MAX_STEPS=512  # 512 (coco14, 20%*40504/32)
 
 DOMAIN_TRAIN_UNLABELED=$DOMAIN_TRAIN
 SAMPLER=default
@@ -91,10 +88,23 @@ PERFORM_VALIDATION=true
 PROGRESS=true
 
 ## Augmentation
-AUGMENT=collorjitter
+# AUGMENT=none_classmix for DeepGlobe
+AUGMENT=colorjitter_classmix
+# AUGMENT=colorjitter_cutmix
 CUTMIX=0.5
 MIXUP=0.5
 LABELSMOOTHING=0.1
+
+S2C_MODE=mp
+S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+C2S_FG=0.20
+C2S_BG=0.05
+C2S_MODE=cam
+
+W_CONTRA=1
+W_U=1
 
 # Evaluation
 MIN_TH=0.05
@@ -226,9 +236,8 @@ train_u2pl() {
     --validate_max_steps $VALIDATE_MAX_STEPS \
     --validate_thresholds $VALIDATE_THRESHOLDS \
     --device $DEVICE \
-    --num_workers $WORKERS_TRAIN;
-    #  \
-    # --restore $RESTORE;
+    --num_workers $WORKERS_TRAIN \
+    --restore $RESTORE;
 }
 
 inference() {
@@ -275,36 +284,19 @@ evaluate_pseudo_masks() {
     --num_workers $WORKERS_INFER;
 }
 
-MODE=fix
-TRAINABLE_STEM=false
-TRAINABLE_STAGE4=false
-TRAINABLE_BONE=true
-
 ## Pascal VOC 2012
 # ARCHITECTURE=resnest269
 # ARCH=rs269
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+# LR=0.007
 
 ## MS COCO 2014
 ARCHITECTURE=resnest101
 ARCH=rs101
-# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
-
-# AUGMENT=colorjitter # none for DeepGlobe
-AUGMENT=classmix
-# AUGMENT=cutmix
-
-S2C_MODE=mp
-S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_FG=0.20
-C2S_BG=0.05
-C2S_MODE=cam
-
-W_CONTRA=1
-W_U=1
+MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+LR=0.05
 
 EID=r1  # Experiment ID
 

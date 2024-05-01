@@ -270,7 +270,7 @@ def train_u2pl(args, wb_run, model_path):
           w_u = args.w_u
           w_contra = args.w_contra
 
-        trackers_enabled = step >= 4
+        trackers_enabled = False  # step >= 4
 
         with torch.autocast(device_type=DEVICE, enabled=args.mixed_precision):
           loss, metrics = train_step(
@@ -360,9 +360,11 @@ def train_u2pl(args, wb_run, model_path):
             f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} "
             f"loss_u={loss_u:.3f} loss_contra={loss_contra:.3f} lr={lr:.3f}"
           )
-          print(*(t.description() for t in BlockTimer.trackers()), sep="\n")
 
-        if do_validation:
+          if trackers_enabled:
+            print(*(t.description() for t in BlockTimer.trackers()), sep="\n")
+
+        if (step + 1) == step_val:
           # Interrupt epoch in case `max_steps < len(train_loader)`.
           break
 
@@ -446,7 +448,7 @@ def train_step(
     with BlockTimer.scope("pseudo-labels-teacher", trackers_enabled):
       teacher_outputs = teacher(images, with_cam=True, with_saliency=False, with_rep=False)
       features_cls_t = teacher_outputs["features_c"].detach()
-      logit_seg_large_t = teacher_outputs["masks_seg_large"].detach()
+      logit_seg_large_t = teacher_outputs["masks_seg_large"].detach().cpu().float()
 
       features_cls_t_l, features_cls_t_u = features_cls_t[:NL], features_cls_t[NL:]
       # rep_t = teacher_outputs["rep"].detach()
@@ -493,12 +495,12 @@ def train_step(
           bg_in_labels=bg_class_clf is not None,
         )
 
-        logit_seg_large_t = logit_seg_large_t.float().to(DEVICE)
+        logit_seg_large_t = logit_seg_large_t.float()  # .to(DEVICE)
         # logit_sal_t = logit_sal_t.float()
         # rep_t = rep_t.float()
 
       pseudo_masks_l, pseudo_masks_u = pseudo_masks[:NL], pseudo_masks[NL:]
-      pseudo_masks_l = pseudo_masks_l.to(DEVICE)
+      # pseudo_masks_l = pseudo_masks_l.to(DEVICE)
 
       logit_seg_large_l_t, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
       label_seg_large_u_t = logit_seg_large_u_t.argmax(dim=1)
@@ -506,9 +508,9 @@ def train_step(
   # Student Forward
   with BlockTimer.scope("student-forward", trackers_enabled):
     outputs = model(images, with_saliency=True, with_mask=True, with_rep=True)
-    logit_seg_large = outputs["masks_seg_large"]
+    logit_seg_large = outputs["masks_seg_large"].cpu().float()
     if use_sal_head:
-      logit_sal = outputs["masks_sal_large"]
+      logit_sal = outputs["masks_sal_large"].cpu().float()
     else:
       logit_sal = logit_seg_large[:, bg_class_seg].unsqueeze(1).detach()
 
@@ -519,12 +521,12 @@ def train_step(
     teacher.train()
     with torch.no_grad():
       teacher_outputs = teacher(images)
-      pred_all_t, rep_all_t = teacher_outputs["masks_seg"], teacher_outputs["rep"].detach()
+      pred_all_t, rep_all_t = teacher_outputs["masks_seg"].cpu().float(), teacher_outputs["rep"].detach().cpu().float()
       prob_all_t = F.softmax(pred_all_t, dim=1)
       prob_l_t, prob_u_t = prob_all_t[:NL], prob_all_t[NL:]
       entropy_u_t = -torch.sum(prob_u_t * torch.log(prob_u_t + 1e-10), dim=1)
 
-      logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:]
+      logit_seg_large_u_t = teacher_outputs["masks_seg_large"][NL:].cpu().float()
       prob_large_u_t = F.softmax(logit_seg_large_u_t, dim=1)
       entropy_large_u_t = -torch.sum(prob_large_u_t * torch.log(prob_large_u_t + 1e-10), dim=1)
       del teacher_outputs
@@ -532,8 +534,12 @@ def train_step(
   with BlockTimer.scope("loss-classification", trackers_enabled):
     # (1) Classification loss.
     logit_c = outputs["logits_c"]
+    feats_c = outputs["features_c"].cpu().float()
     # logit_c_l, logit_c_u = outputs["logits_c"][:num_labeled], outputs["logits_c"][num_labeled:]
-    loss_c = criterion_c(logit_c, label_smoothing(true_labels, ls).to(DEVICE))
+    loss_c = criterion_c(
+      logit_c,
+      label_smoothing(true_labels, ls).to(logit_c.device)
+    )
 
   # (2) Segmentation loss.
   with BlockTimer.scope("loss-segmentation", trackers_enabled):
@@ -548,7 +554,10 @@ def train_step(
       # All label maps have only bg or void class.
       loss_c2s = torch.zeros_like(loss_c)
     else:
-      loss_c2s = criterion_c2s(logit_seg_large_l[samples_valid], pseudo_masks_l[samples_valid])
+      loss_c2s = criterion_c2s(
+        logit_seg_large_l[samples_valid],
+        pseudo_masks_l[samples_valid].to(logit_seg_large_l.device)
+      )
 
   # (3) Mutual Promotion Branches Consistency loss.
   with BlockTimer.scope("loss-mp", trackers_enabled):
@@ -556,7 +565,7 @@ def train_step(
       loss_s2c = torch.zeros_like(loss_c)
       conf_pixels_s2c = torch.zeros_like(conf_pixels_c2s)
     else:
-      feats_c = resize_tensor(outputs["features_c"], logit_sal.shape[2:], "bilinear", align_corners=True)
+      feats_c = resize_tensor(feats_c, logit_sal.shape[2:], "bilinear", align_corners=True)
       masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
 
       probs_seg_large_t = torch.softmax(logit_seg_large_t, dim=1)
@@ -565,7 +574,7 @@ def train_step(
       conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
       pmasks_sal[~conf_pixels_s2c] = 255
 
-      loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(DEVICE))
+      loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(masks_c.device))
 
       conf_pixels_s2c = conf_pixels_s2c.float().mean()
 
@@ -589,8 +598,8 @@ def train_step(
     if not w_contra:
       loss_contra = torch.zeros_like(loss_c)
     else:
-      pred_all = outputs["masks_seg"]
-      rep_all = outputs["rep"]
+      pred_all = outputs["masks_seg"].cpu()
+      rep_all = outputs["rep"].cpu()
       del outputs
 
       alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
@@ -600,7 +609,7 @@ def train_step(
           torch.cat((pseudo_masks_l.float(), label_seg_large_u_t.float())).unsqueeze(1),
           size=pred_all.shape[2:],
           mode="nearest",
-        ).squeeze(1).long()
+        ).squeeze(1)
 
         pseudo_masks_l = low_res_masks[:NL]
         label_seg_u_t = low_res_masks[NL:]
