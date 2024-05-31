@@ -55,12 +55,12 @@ echo "=================================================="
 # do
 #   echo "Enqueuing segment-anything/scripts-amg"
 #   echo "=================================================="
-
-#   CUDA_VISIBLE_DEVICES=$INDEX \
-#   $PY scripts/amg.py \
-#     --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
-#     --input $DATA_DIR/val2014/folder$INDEX \
-#     --output ../SAM_WSSS/SAM/coco14/ &
+INDEX=0
+CUDA_VISIBLE_DEVICES=$INDEX \
+$PY scripts/amg.py \
+  --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
+  --input $DATA_DIR/val2014 \
+  --output ../SAM_WSSS/SAM/coco14/
 # done
 
 # echo "Waiting for jobs to finish..."
@@ -73,5 +73,7 @@ echo "================================"
 echo "SAM_WSSS/main"
 echo "================================"
 
-PSEUDO_PATH=../experiments/predictions/u2pl/coco14-512-rs101-lr0.05-m0-b16-classmix-default-bg0.05-fg0.20-u1-c1-r1@val/pseudos-t0.35-c10
-$PY main.py --pseudo_path $PSEUDO_PATH --sam_path SAM/coco14/
+# PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs101-lr0.05-m0-b32-colorjitter_classmix-default-bg0.05-fg0.20-u1-c1-r1@val/pseudos-t0.35-c10
+PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@val/pseudos-t0.4-c10
+$PY main.py --number_class 81 --pseudo_path $PSEUDO_PATH --sam_path SAM/coco14/
+

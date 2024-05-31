@@ -36,16 +36,14 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-# DATASET=voc12  # Pascal VOC 2012
-DATASET=coco14  # MS COCO 2014
+DATASET=voc12  # Pascal VOC 2012
+# DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
 . $WORK_DIR/runners/config/dataset.sh
 
 export 'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256'
-
-$PIP install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
 cd $WORK_DIR
 export PYTHONPATH=$(pwd)
@@ -60,15 +58,14 @@ MODE=fix
 TRAINABLE_STEM=false
 TRAINABLE_STAGE4=false
 TRAINABLE_BONE=true
-TRAINABLE_BONE=true
 DILATED=false
 USE_SAL_HEAD=false
 USE_REP_HEAD=true
 
 # Training
 OPTIMIZER=sgd  # sgd,lion,adam
-MOMENTUM=0
-NESTEROV=false
+MOMENTUM=0.9
+NESTEROV=true
 FIRST_EPOCH=0
 EPOCHS=15
 BATCH=32
@@ -99,7 +96,7 @@ S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_FG=0.20
+C2S_FG=0.40
 C2S_BG=0.05
 C2S_MODE=cam
 
@@ -262,12 +259,12 @@ inference() {
     --save_cams false \
     --save_masks false \
     --save_pseudos true \
-    --threshold 0.35 \
+    --threshold $INF_T \
     --crf_t 10
 }
 
 evaluate_pseudo_masks() {
-  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT" \
+  WANDB_TAGS="$DATASET,$ARCH,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT,t:$INF_T" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
     --experiment_name $TAG \
@@ -285,39 +282,46 @@ evaluate_pseudo_masks() {
 }
 
 ## Pascal VOC 2012
-# ARCHITECTURE=resnest269
-# ARCH=rs269
-# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
-# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-# LR=0.007
+ARCHITECTURE=resnest269
+ARCH=rs269
+RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+LR=0.007
 
 ## MS COCO 2014
-ARCHITECTURE=resnest101
-ARCH=rs101
-RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
-MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
-LR=0.05
+# MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+# LR=0.007
+# ARCHITECTURE=resnest269
+# ARCH=rs269
+# RESTORE=experiments/models/pnoc/coco14-rs269-pnoc-b16-a2-lr0.05-ls0-ow0.0-1.0-1.0-c0.2-is1@rs269ra-r1-converted.pth
+# REST=rs269pnoc
+# ARCHITECTURE=resnest101
+# ARCH=rs101
+# RESTORE=experiments/models/vanilla/coco14-rs101-lr0.05-r1.pth
+# REST=rs101cam
+# RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
+# REST=rs101pnoc
 
 EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-$EID
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA@$REST-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
 
+INF_T=0.35
+
 # DOMAIN=$DOMAIN_TRAIN inference
 # DOMAIN=$DOMAIN_VALID     inference
-# DOMAIN=$DOMAIN_VALID_SEG inference
-KIND=masks
-IGNORE_BG_CAM=true
+DOMAIN=$DOMAIN_VALID_SEG inference
 
-MIN_TH=0.05
-MAX_TH=0.81
-PRED_DIR=$PRED_ROOT@train/$KIND
-# DOMAIN=train TAG=$TAG@train          evaluate_pseudo_masks
-# DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=0.9 evaluate_pseudo_masks
-# DOMAIN=train TAG=$TAG@train CRF_T=10 CRF_GT=1.0 evaluate_pseudo_masks
-# PRED_DIR=$PRED_ROOT@val/$KIND
-# DOMAIN=val TAG=$TAG@val evaluate_pseudo_masks
-# DOMAIN=val TAG=$TAG@val CRF_T=10 evaluate_pseudo_masks
+# IGNORE_BG_CAM=true
+EVAL_MODE=png
+
+PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
+
+# PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10/pseudos-t$INF_T-c10__max_iou_imp2
+# DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
+
