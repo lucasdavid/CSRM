@@ -51,7 +51,7 @@ parser.add_argument('--tag', default='', type=str)
 parser.add_argument('--weights', default='', type=str)
 parser.add_argument('--domain', default='train', type=str)
 parser.add_argument('--scales', default='0.5,1.0,1.5,2.0', type=str)
-parser.add_argument('--exclude_bg_images', default=True, type=str2bool)
+parser.add_argument('--exclude_bg_images', default=False, type=str2bool)
 
 
 parser.add_argument("--threshold", default=0.25, type=float)
@@ -136,32 +136,39 @@ def _work(
       strided_size = get_strided_size((H, W), 4)
       strided_up_size = get_strided_up_size((H, W), 16)
 
-      cams, masks = zip(*(forward_tta(model, image, scale, device, args.save_masks) for scale in scales))
+      if label.sum() == 0:
+        keys = np.asarray([data_source.segmentation_info.bg_class])
+        cams_st = np.zeros((0, *strided_size))
+        cams_hr = np.zeros((0, *strided_up_size))
+      else:
+        cams, masks = zip(*(forward_tta(model, image, scale, device, args.save_masks) for scale in scales))
 
-      cams_st = [resize_tensor(c.unsqueeze(0), strided_size)[0] for c in cams]
-      cams_st = torch.sum(torch.stack(cams_st), dim=0)
+        cams_st = [resize_tensor(c.unsqueeze(0), strided_size)[0] for c in cams]
+        cams_st = torch.sum(torch.stack(cams_st), dim=0)
 
-      cams_hr = [resize_tensor(cams.unsqueeze(0), strided_up_size)[0] for cams in cams]
-      cams_hr = torch.sum(torch.stack(cams_hr), dim=0)[:, :H, :W]
+        cams_hr = [resize_tensor(cams.unsqueeze(0), strided_up_size)[0] for cams in cams]
+        cams_hr = torch.sum(torch.stack(cams_hr), dim=0)[:, :H, :W]
 
-      keys = torch.nonzero(torch.from_numpy(label))[:, 0]
-      cams_st = cams_st[keys]
-      cams_st /= F.adaptive_max_pool2d(cams_st, (1, 1)) + 1e-5
-      cams_hr = cams_hr[keys]
-      cams_hr /= F.adaptive_max_pool2d(cams_hr, (1, 1)) + 1e-5
-      keys = np.pad(keys + 1, (1, 0), mode='constant')
-      hr_cam = to_numpy(cams_hr)
+        keys = torch.nonzero(torch.from_numpy(label))[:, 0]
+        cams_st = cams_st[keys]
+        cams_st /= F.adaptive_max_pool2d(cams_st, (1, 1)) + 1e-5
+        cams_hr = cams_hr[keys]
+        cams_hr /= F.adaptive_max_pool2d(cams_hr, (1, 1)) + 1e-5
+
+        keys = np.pad(keys + 1, (1, 0), mode='constant')  # add background
+        cams_st = cams_st.cpu()
+        cams_hr = to_numpy(cams_hr)
 
       if args.save_cams and not os.path.isfile(cam_path):
-        safe_save(cam_path, {"keys": keys, "cam": cams_st.cpu(), "hr_cam": hr_cam})
+        safe_save(cam_path, {"keys": keys, "cam": cams_st, "hr_cam": cams_hr})
 
       if args.save_pseudos:
         keys = np.pad(np.nonzero(label)[0] + 1, (1, 0), mode="constant")
-        cam = np.pad(hr_cam, ((1, 0), (0, 0), (0, 0)), mode="constant", constant_values=args.threshold)
+        cam = np.pad(cams_hr, ((1, 0), (0, 0), (0, 0)), mode="constant", constant_values=args.threshold)
         prob = cam
         cam = np.argmax(cam, axis=0)
 
-        if args.crf_t:
+        if args.crf_t and len(keys) > 1:
           img = np.asarray(image).astype(np.uint8)
 
           if prob is not None and args.crf_gt_prob == 1.0:

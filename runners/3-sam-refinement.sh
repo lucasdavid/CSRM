@@ -2,9 +2,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=48
 #SBATCH -p sequana_gpu_shared
-#SBATCH -J ss-train
+#SBATCH -J ss-refine
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/refine-%j.out
-#SBATCH --time=12:00:00
+#SBATCH --time=4:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -36,8 +36,8 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-# DATASET=voc12  # Pascal VOC 2012
-DATASET=coco14  # MS COCO 2014
+DATASET=voc12  # Pascal VOC 2012
+# DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -55,12 +55,12 @@ echo "=================================================="
 # do
 #   echo "Enqueuing segment-anything/scripts-amg"
 #   echo "=================================================="
-INDEX=0
-CUDA_VISIBLE_DEVICES=$INDEX \
-$PY scripts/amg.py \
-  --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
-  --input $DATA_DIR/val2014 \
-  --output ../SAM_WSSS/SAM/coco14/
+# INDEX=0
+# CUDA_VISIBLE_DEVICES=$INDEX \
+# $PY scripts/amg.py \
+#   --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
+#   --input $DATA_DIR/JPEGImages \
+#   --output ../SAM_WSSS/SAM/voc12/ &
 # done
 
 # echo "Waiting for jobs to finish..."
@@ -73,7 +73,13 @@ echo "================================"
 echo "SAM_WSSS/main"
 echo "================================"
 
-# PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs101-lr0.05-m0-b32-colorjitter_classmix-default-bg0.05-fg0.20-u1-c1-r1@val/pseudos-t0.35-c10
-PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@val/pseudos-t0.4-c10
-$PY main.py --number_class 81 --pseudo_path $PSEUDO_PATH --sam_path SAM/coco14/
+PSEUDO_PATH=../experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1@train/pseudos-t0.4-c10
+# $PY main.py --number_class 21 --pseudo_path $PSEUDO_PATH --sam_path SAM/voc12/
+
+PSEUDO_PATH=../experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1@val/pseudos-t0.4-c10
+$PY main.py --number_class 21 --pseudo_path $PSEUDO_PATH --sam_path SAM/voc12/
+
+# PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@train/pseudos-t0.4-c10
+# PSEUDO_PATH=../experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@val/pseudos-t0.4-c10
+# $PY main.py --number_class 81 --pseudo_path $PSEUDO_PATH --sam_path SAM/coco14/
 
