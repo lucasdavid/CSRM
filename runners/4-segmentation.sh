@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J segm
 #SBATCH -o /scratch/lerdl/lucas.david/logs/%j-segm.out
-#SBATCH --time=96:00:00
+#SBATCH --time=32:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -26,7 +26,7 @@
 
 if [[ "$(hostname)" == "sdumont"* ]]; then
   ENV=sdumont
-  WORK_DIR=$SCRATCH/pnoc-transformers
+  WORK_DIR=$SCRATCH/pnoc
 else
   ENV=local
   WORK_DIR=$HOME/workspace/repos/research/wsss/pnoc
@@ -82,8 +82,8 @@ LR=0.004  # coco14
 
 EPOCHS=15
 
-BATCH_SIZE=16
-ACCUMULATE_STEPS=2
+BATCH_SIZE=32
+ACCUMULATE_STEPS=1
 
 AUGMENT=none # colorjitter_randaug_cutmix_mixup_cutormixup
 AUG=no
@@ -186,33 +186,35 @@ evaluate_masks() {
 ## 4.1 DeepLabV3+ Training
 ##
 
-# LABELSMOOTHING=0.1
-AUGMENT=colorjitter  # colorjitter_randaug_cutmix_mixup_cutormixup
-AUG=cj
+LABELSMOOTHING=0.0
+AUGMENT=none  # colorjitter_randaug_cutmix_mixup_cutormixup
+AUG=no
 
 ## For supervised segmentation:
 # PRIORS_TAG=sup
 # MASKS_DIR=""
 
 ## For custom masks (pseudo masks from WSSS):
-# PRIORS_TAG=u2pl-rs101-ccamh-sam
-# MASKS_DIR=./experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1_pseudos-t0.4-c10__max_iou_imp2
+PRIORS_TAG=u2pl-rs101-ccamh-sam
+MASKS_DIR=./experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1_pseudos-t0.4-c10__max_iou_imp2
 
-PRIORS_TAG=u2pl-rs269-ccamh-sam
-MASKS_DIR=./experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1_pseudos-t0.4-c10__max_iou_imp2
+# PRIORS_TAG=u2pl-rs269-ccamh-sam
+# MASKS_DIR=./experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1_pseudos-t0.4-c10__max_iou_imp2
 
-TAG=segmentation/$DATASET-$IMAGE_SIZE-$ARCH-lr$LR-b$BATCH_SIZE-$MODE-$AUG-$PRIORS_TAG
-segm_training
+# TAG=segmentation/$DATASET-$IMAGE_SIZE-$ARCH-lr$LR-b$BATCH_SIZE-$MODE-$AUG-$PRIORS_TAG
+TAG=segmentation/coco14-640-rs269-lr0.004-b16-fix-u2pl-rs269-ccamh-sam
+# segm_training
 
 # 4.2 DeepLabV3+ Inference
 #
 
 SEGM_PRED_DIR=./experiments/predictions/$TAG@crf=$CRF_T
 # DOMAIN=$DOMAIN_VALID     segm_inference
-# DOMAIN=$DOMAIN_VALID_SEG segm_inference
+DOMAIN=$DOMAIN_VALID_SEG segm_inference
 # DOMAIN=$DOMAIN_TEST      SEGM_PRED_DIR=./experiments/predictions/$TAG@test@crf=$CRF_T segm_inference
 
 # 4.3. Evaluation
 #
 # DOMAIN=$DOMAIN_VALID     evaluate_masks
-# DOMAIN=$DOMAIN_VALID_SEG evaluate_masks
+DOMAIN=$DOMAIN_VALID_SEG evaluate_masks
+

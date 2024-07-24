@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=1:00:00
+#SBATCH --time=38:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -56,7 +56,7 @@ ARCH=rs269
 ARCHITECTURE=resnest269
 MODE=fix
 TRAINABLE_STEM=false
-TRAINABLE_STAGE4=false
+TRAINABLE_STAGE4=true
 TRAINABLE_BONE=true
 DILATED=false
 USE_SAL_HEAD=false
@@ -87,7 +87,7 @@ PROGRESS=true
 
 ## Augmentation
 # AUGMENT=none_classmix for DeepGlobe
-AUGMENT=colorjitter_classmix
+AUGMENT=classmix
 # AUGMENT=colorjitter_cutmix
 CUTMIX=0.5
 MIXUP=0.5
@@ -97,7 +97,7 @@ S2C_MODE=mp
 S2C_SIGMA=0.50   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 C2S_SIGMA=0.75   # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
-C2S_FG=0.35
+C2S_FG=0.30
 C2S_BG=0.05
 C2S_MODE=cam
 
@@ -307,12 +307,12 @@ evaluate_pseudo_masks() {
 # region Pascal VOC 2012
 #
 MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-ARCHITECTURE=resnest101
-ARCH=rs101
-RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-# ARCHITECTURE=resnest269
-# ARCH=rs269
-# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+# ARCHITECTURE=resnest101
+# ARCH=rs101
+# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
+ARCHITECTURE=resnest269
+ARCH=rs269
+RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # endregion
 
 # region MS COCO 2014
@@ -330,13 +330,10 @@ RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
 # REST=rs101pnoc
 # endregion
 
-EID=r1  # Experiment ID
+EID=r2  # Experiment ID
 
 TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA@$REST-$EID
-# train_u2pl
-
-TAG=u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1
-TAG_SAL=saliency/voc12-pn@ccamh-rs101-fg0.5@rs101u2pl-cams@rs101p
+train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
@@ -344,8 +341,8 @@ PRED_ROOT=experiments/predictions/$TAG
 INF_T=0.4
 
 # DOMAIN=$DOMAIN_TRAIN inference
-# DOMAIN=$DOMAIN_VALID     inference
-# DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
 
 # region Evaluation
 
@@ -365,6 +362,6 @@ INF_T=0.4
 # region Pseudo segmentation masks
 
 # PRED_DIR=$PRED_ROOT@train/cams SAL_DIR=experiments/predictions/$TAG_SAL OUTPUT_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_TRAIN make_pseudo_masks
-PRED_DIR=$PRED_ROOT@val/cams SAL_DIR=experiments/predictions/$TAG_SAL OUTPUT_DIR=$PRED_ROOT@tval/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_VALID_SEG make_pseudo_masks
+# PRED_DIR=$PRED_ROOT@val/cams SAL_DIR=experiments/predictions/$TAG_SAL OUTPUT_DIR=$PRED_ROOT@tval/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_VALID_SEG make_pseudo_masks
 
 # endregion

@@ -722,9 +722,8 @@ def valid_step(
       if step == 0 and log_samples:
         inputs = to_numpy(inputs)
         wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes, tag="val/priors")
-        wandb_utils.log_masks(
-          ids, inputs, targets, masks, pred_masks, info_seg.classes, info_seg.void_class, tag="val/segmentation"
-        )
+        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes,
+                              void_class=info_seg.void_class, tag="val/segmentation")
 
       if max_steps and step >= max_steps:
         break
