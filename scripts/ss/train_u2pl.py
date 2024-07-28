@@ -95,6 +95,8 @@ parser.add_argument('--c2s_fg', default=0.30, type=float)
 parser.add_argument('--c2s_bg', default=0.05, type=float)
 parser.add_argument('--w_u', default=1, type=float)
 parser.add_argument('--w_contra', default=1, type=float)
+parser.add_argument('--contra_low_rank', default=3, type=int)
+parser.add_argument('--contra_high_rank', default=20, type=int)
 parser.add_argument('--warmup_epochs', default=1, type=int)
 
 # RECO
@@ -300,6 +302,8 @@ def train_u2pl(args, wb_run, model_path):
             use_sal_head=args.use_sal_head,
             warmup_epochs=args.warmup_epochs,
             max_epochs=args.max_epoch,
+            contra_low_rank=args.contra_low_rank,
+            contra_high_rank=args.contra_high_rank,
             trackers_enabled=trackers_enabled,
           )
 
@@ -429,6 +433,8 @@ def train_step(
   warmup_epochs: int = 0,
   max_epochs: int = 15,
   low_entropy_threshold: int = 20,
+  contra_low_rank=3,
+  contra_high_rank=20,
   trackers_enabled: bool = True,
 ):
   _, images_l, true_labels_l, true_masks_l = batch_l
@@ -451,11 +457,6 @@ def train_step(
       logit_seg_large_t = teacher_outputs["masks_seg_large"].detach().cpu().float()
 
       features_cls_t_l, features_cls_t_u = features_cls_t[:NL], features_cls_t[NL:]
-      # rep_t = teacher_outputs["rep"].detach()
-      # if use_sal_head:
-      #   logit_sal_t = teacher_outputs["masks_sal_large"].detach()
-      # else:
-      #   logit_sal_t = logit_seg_large_t[:, bg_class:bg_class + 1]
       del teacher_outputs
 
     with BlockTimer.scope("pseudo-labels-gen", trackers_enabled):
@@ -481,13 +482,11 @@ def train_step(
           true_labels,
           pseudo_masks,
           logit_seg_large_t,
-          # logit_sal_t,
         ) = data_utils.mixaug(
           images,
           true_labels,
           pseudo_masks,
           logit_seg_large_t.cpu(),
-          # logit_sal_t,
           beta=1.0,
           k=1,
           mix=mix,
@@ -495,15 +494,15 @@ def train_step(
           bg_in_labels=bg_class_clf is not None,
         )
 
-        logit_seg_large_t = logit_seg_large_t.float()  # .to(DEVICE)
-        # logit_sal_t = logit_sal_t.float()
-        # rep_t = rep_t.float()
+        logit_seg_large_t = logit_seg_large_t.float()
 
       pseudo_masks_l, pseudo_masks_u = pseudo_masks[:NL], pseudo_masks[NL:]
-      # pseudo_masks_l = pseudo_masks_l.to(DEVICE)
 
-      logit_seg_large_l_t, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
-      label_seg_large_u_t = logit_seg_large_u_t.argmax(dim=1)
+      _, logit_seg_large_u_t = logit_seg_large_t[:NL], logit_seg_large_t[NL:]
+      probs_seg_large_t = F.softmax(logit_seg_large_t, dim=1)
+      probs_seg_large_t *= F.pad(true_labels, (1, 0), value=1)[..., None, None]
+      probs_seg_large_t /= probs_seg_large_t.sum(dim=1, keepdims=True)
+      label_seg_large_u_t = probs_seg_large_t[NL:].argmax(dim=1)
 
   # Student Forward
   with BlockTimer.scope("student-forward", trackers_enabled):
@@ -515,6 +514,13 @@ def train_step(
       logit_sal = logit_seg_large[:, bg_class_seg].unsqueeze(1).detach()
 
     logit_seg_large_l, logit_seg_large_u = logit_seg_large[:NL], logit_seg_large[NL:]
+
+    logit_c = outputs["logits_c"]
+    feats_c = outputs["features_c"].cpu().float()
+
+    pred_hw = outputs["masks_seg"].shape[2:]
+    rep_all = outputs["rep"].cpu()
+    del outputs
 
   # Teacher Forward
   with BlockTimer.scope("teacher-forward", trackers_enabled):
@@ -533,9 +539,6 @@ def train_step(
 
   with BlockTimer.scope("loss-classification", trackers_enabled):
     # (1) Classification loss.
-    logit_c = outputs["logits_c"]
-    feats_c = outputs["features_c"].cpu().float()
-    # logit_c_l, logit_c_u = outputs["logits_c"][:num_labeled], outputs["logits_c"][num_labeled:]
     loss_c = criterion_c(
       logit_c,
       label_smoothing(true_labels, ls).to(logit_c.device)
@@ -568,7 +571,6 @@ def train_step(
       feats_c = resize_tensor(feats_c, logit_sal.shape[2:], "bilinear", align_corners=True)
       masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
 
-      probs_seg_large_t = torch.softmax(logit_seg_large_t, dim=1)
       conf_pixels_s2c, pmasks_sal = probs_seg_large_t.max(1)
 
       conf_pixels_s2c = conf_pixels_s2c > s2c_sigma
@@ -598,28 +600,19 @@ def train_step(
     if not w_contra:
       loss_contra = torch.zeros_like(loss_c)
     else:
-      pred_all = outputs["masks_seg"].cpu()
-      rep_all = outputs["rep"].cpu()
-      del outputs
-
       alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
 
       with torch.no_grad():
-        low_res_masks = F.interpolate(
-          torch.cat((pseudo_masks_l.float(), label_seg_large_u_t.float())).unsqueeze(1),
-          size=pred_all.shape[2:],
-          mode="nearest",
-        ).squeeze(1)
+        low_res_masks = torch.cat((pseudo_masks_l.float(), label_seg_large_u_t.float())).unsqueeze(1)
+        low_res_masks = F.interpolate(low_res_masks, size=pred_hw, mode="nearest").squeeze(1)
 
         pseudo_masks_l = low_res_masks[:NL]
         label_seg_u_t = low_res_masks[NL:]
         valid_mask = label_seg_u_t != 255
 
-        # low_thresh = np.percentile(entropy_u_t[valid_mask].cpu().numpy().flatten(), alpha_t)
         low_thresh = torch.quantile(entropy_u_t[valid_mask], alpha_t / 100.)
         low_entropy_mask = (entropy_u_t < low_thresh) & valid_mask
 
-        # high_thresh = np.percentile(entropy_u_t[valid_mask].cpu().numpy().flatten(), 100 - alpha_t)
         high_thresh = torch.quantile(entropy_u_t[valid_mask], 1 - alpha_t / 100)
         high_entropy_mask = (entropy_u_t >= high_thresh) & valid_mask
 
@@ -630,14 +623,14 @@ def train_step(
 
         # down sample and concat
         label_l_small = u2pl.label_onehot(
-          F.interpolate(pseudo_masks_l.unsqueeze(1), size=pred_all.shape[2:], mode="nearest").squeeze(1).long(), num_classes)
+          F.interpolate(pseudo_masks_l.unsqueeze(1), size=pred_hw, mode="nearest").squeeze(1).long(), num_classes)
         label_u_small = u2pl.label_onehot(
-          F.interpolate(label_seg_u_t.unsqueeze(1), size=pred_all.shape[2:], mode="nearest").squeeze(1).long(), num_classes)
+          F.interpolate(label_seg_u_t.unsqueeze(1), size=pred_hw, mode="nearest").squeeze(1).long(), num_classes)
 
       cfg_contra = dict(
         negative_high_entropy=True,
-        low_rank=3,
-        high_rank=20,
+        low_rank=contra_low_rank,
+        high_rank=contra_high_rank,
         current_class_threshold=0.3,
         current_class_negative_threshold=1,
         unsupervised_entropy_ignore=80,
@@ -653,6 +646,8 @@ def train_step(
         label_u_small,
         prob_l_t.detach(),
         prob_u_t.detach(),
+        true_labels_l,
+        true_labels_u,
         low_mask_all,
         high_mask_all,
         cfg_contra,

@@ -111,10 +111,12 @@ def compute_unsupervised_loss(predict, target, percent, entropy_teacher):
 
 def compute_contra_memobank_loss(
   rep,
-  label_l,
-  label_u,
+  mask_l,
+  mask_u,
   prob_l,
   prob_u,
+  label_l,
+  label_u,
   low_mask,
   high_mask,
   cfg,
@@ -135,19 +137,19 @@ def compute_contra_memobank_loss(
   num_negatives = cfg["num_negatives"]
 
   num_feat = rep.shape[1]
-  num_labeled = label_l.shape[0]
-  num_segments = label_l.shape[1]
+  num_labeled = mask_l.shape[0]
+  num_segments = mask_l.shape[1]
 
-  labels = torch.cat((label_l, label_u), dim=0)
+  label_masks = torch.cat((mask_l, mask_u), dim=0)
 
-  low_valid_pixel = (labels * low_mask).bool()
-  high_valid_pixel = (labels * high_mask).bool()
+  low_valid_pixel = (label_masks * low_mask).bool()
+  # high_valid_pixel = (label_masks * high_mask).bool()
 
   rep = rep.permute(0, 2, 3, 1)
   rep_teacher = rep_teacher.permute(0, 2, 3, 1)
 
-  seg_feat_all_list = []
-  seg_feat_low_entropy_list = []  # candidate anchor pixels
+  # seg_feat_all_entropies = []
+  seg_feat_low_entropies = []  # candidate anchor pixels
   # seg_num_list = []  # the number of low_valid pixels in each class
   seg_proto_list = []  # the center of each class
 
@@ -164,30 +166,37 @@ def compute_contra_memobank_loss(
 
   valid_classes = []
   new_keys = []
+
+  label_u = F.pad(label_u, (1, 0), value=1).reshape((label_u.shape[0], -1, 1, 1))
+
   for i in range(num_segments):
     low_valid_pixel_i = low_valid_pixel[:, i]  # select binary mask for i-th class
-    high_valid_pixel_i = high_valid_pixel[:, i]
+    # high_valid_pixel_i = high_valid_pixel[:, i]
+    high_valid_pixel_i = high_mask[:, 0]
 
     prob_seg = prob[:, i, :, :]
     rep_mask_low_entropy = (prob_seg > current_class_threshold) * low_valid_pixel_i
     rep_mask_high_entropy = (prob_seg < current_class_negative_threshold) * high_valid_pixel_i
 
-    seg_feat_all_list.append(rep[low_valid_pixel_i])
-    seg_feat_low_entropy_list.append(rep[rep_mask_low_entropy])
+    seg_feat_low_entropies.append(rep[rep_mask_low_entropy])
+    # seg_feat_all_entropies.append(rep[low_valid_pixel_i])
 
     # positive sample: center of the class
     seg_proto_list.append(torch.mean(rep_teacher[low_valid_pixel_i].detach(), dim=0, keepdim=True))
 
-    # generate class mask for unlabeled data
-    # prob_i_classes = prob_indices_u[rep_mask_high_entropy[num_labeled :]]
-    class_mask_u = torch.sum(prob_indices_u[:, :, :, low_rank:high_rank].eq(i), dim=3).bool()
-
     # generate class mask for labeled data
-    # label_l_mask = rep_mask_high_entropy[: num_labeled] * (label_l[:, i] == 0)
-    # prob_i_classes = prob_indices_l[label_l_mask]
+    # i-th class is likely/prob_i high (but class not in GT/mask_i == 0).
     class_mask_l = torch.sum(prob_indices_l[:, :, :, :low_rank].eq(i), dim=3).bool()
 
-    class_mask = torch.cat((class_mask_l * (label_l[:, i] == 0), class_mask_u), dim=0)
+    # generate class mask for unlabeled data
+    # prob_i_classes = prob_indices_u[rep_mask_high_entropy[num_labeled :]]
+    class_mask_u = torch.sum(prob_indices_u[:, :, :, :low_rank].eq(i), dim=3).bool()
+    class_mask_u2 = torch.sum(prob_indices_u[:, :, :, low_rank:high_rank].eq(i), dim=3).bool()
+
+    class_mask = torch.cat((
+      class_mask_l * (mask_l[:, i] == 0),
+      class_mask_u & (label_u[:, i] == 0) | class_mask_u2,
+    ), dim=0)
 
     negative_mask = rep_mask_high_entropy * class_mask
 
@@ -221,14 +230,14 @@ def compute_contra_memobank_loss(
     # prototype = torch.zeros((prob_indices_l.shape[-1], num_queries, 1, num_feat)).to(device)
 
     for i in range(valid_seg):
-      if not (len(seg_feat_low_entropy_list[i]) > 0 and memobank[valid_classes[i]][0].shape[0] > 0):
+      if not (len(seg_feat_low_entropies[i]) > 0 and memobank[valid_classes[i]][0].shape[0] > 0):
         # in some rare cases, all queries in the current query class are easy
         # reco_loss = reco_loss + 0 * rep.sum()
         continue
 
       # select anchor pixel
-      seg_low_entropy_idx = torch.randint(len(seg_feat_low_entropy_list[i]), size=(num_queries,))
-      anchor_feat = seg_feat_low_entropy_list[i][seg_low_entropy_idx].clone()
+      seg_low_entropy_idx = torch.randint(len(seg_feat_low_entropies[i]), size=(num_queries,))
+      anchor_feat = seg_feat_low_entropies[i][seg_low_entropy_idx].clone()
 
       # apply negative key sampling from memory bank (with no gradients)
       with torch.no_grad():

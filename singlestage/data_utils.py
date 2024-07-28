@@ -124,7 +124,6 @@ def mixaug(
           # masks do. Shift mask label to match the target.
           new_labels -= 1
         labels_[ai, new_labels] = 1.
-        # alpha_b = mix_b.float().mean()
       else:
         raise ValueError(f"Unknown mix {mix}. Options are `cutmix` and `classmix`.")
 

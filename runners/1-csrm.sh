@@ -4,7 +4,7 @@
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
 #SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
-#SBATCH --time=38:00:00
+#SBATCH --time=24:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -36,8 +36,8 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-DATASET=voc12  # Pascal VOC 2012
-# DATASET=coco14  # MS COCO 2014
+# DATASET=voc12  # Pascal VOC 2012
+DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -103,6 +103,9 @@ C2S_MODE=cam
 
 W_CONTRA=1
 W_U=1
+
+CONTRA_LOW_RANK=3
+CONTRA_HIGH_RANK=6  # 20
 
 # Evaluation
 MIN_TH=0.05
@@ -180,7 +183,7 @@ train_u2pl() {
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER" \
+  WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-u2pl" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
     $PY scripts/ss/train_u2pl.py \
@@ -193,6 +196,8 @@ train_u2pl() {
     --c2s_fg    $C2S_FG \
     --c2s_bg    $C2S_BG \
     --w_contra  $W_CONTRA \
+    --contra_low_rank $CONTRA_LOW_RANK \
+    --contra_high_rank $CONTRA_HIGH_RANK \
     --w_u       $W_U \
     --warmup_epochs $WARMUP_EPOCHS \
     --optimizer $OPTIMIZER \
@@ -289,7 +294,7 @@ evaluate_pseudo_masks() {
   # referencing the DenseCRF's parameters used to generate the segmentation proposals.
   # DenseCRF will not be re-run during `evaluation` (crf_t=0).
   #
-  WANDB_TAGS="$DATASET,$ARCH,u2pl,lr:$LR,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,domain:$DOMAIN,crf:$CRF_T-$CRF_GT,t:$INF_T" \
+  WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK,domain:$DOMAIN,crf:$CRF_T-$CRF_GT,t:$INF_T" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
     --experiment_name $TAG \
@@ -306,22 +311,27 @@ evaluate_pseudo_masks() {
 
 # region Pascal VOC 2012
 #
-MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
 # ARCHITECTURE=resnest101
 # ARCH=rs101
-# RESTORE=experiments/models/puzzle/ResNeSt101@Puzzle@optimal.pth
-ARCHITECTURE=resnest269
-ARCH=rs269
-RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+# RESTORE=experiments/models/puzzle/rs101p.pth
+# REST=rs101p
+# ARCHITECTURE=resnest269
+# ARCH=rs269
+# RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
+# REST=rs269pnoc
 # endregion
 
 # region MS COCO 2014
-# MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+CONTRA_LOW_RANK=3
+CONTRA_HIGH_RANK=6  # 20
+C2S_FG=0.35
 
-# ARCHITECTURE=resnest269
-# ARCH=rs269
-# RESTORE=experiments/models/pnoc/coco14-rs269-pnoc-b16-a2-lr0.05-ls0-ow0.0-1.0-1.0-c0.2-is1@rs269ra-r1.pth
-# REST=rs269pnoc
+ARCHITECTURE=resnest269
+ARCH=rs269
+RESTORE=experiments/models/pnoc/coco14-rs269-pnoc-b16-a2-lr0.05-ls0-ow0.0-1.0-1.0-c0.2-is1@rs269ra-r1.pth
+REST=rs269pnoc
 # ARCHITECTURE=resnest101
 # ARCH=rs101
 # RESTORE=experiments/models/vanilla/coco14-rs101-lr0.05-r1.pth
@@ -330,9 +340,9 @@ RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # REST=rs101pnoc
 # endregion
 
-EID=r2  # Experiment ID
+EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA@$REST-$EID
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-hemfl@$REST-$EID
 train_u2pl
 
 WEIGHTS=experiments/models/$TAG-best.pth
@@ -341,8 +351,8 @@ PRED_ROOT=experiments/predictions/$TAG
 INF_T=0.4
 
 # DOMAIN=$DOMAIN_TRAIN inference
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
+# DOMAIN=$DOMAIN_VALID     inference
+# DOMAIN=$DOMAIN_VALID_SEG inference
 
 # region Evaluation
 
