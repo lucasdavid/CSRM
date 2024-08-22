@@ -12,7 +12,7 @@ from torch.utils.data import Subset
 from tqdm import tqdm
 
 import datasets
-from singlestage import CSRM
+from csrm import CSRM
 from core.networks import *
 from tools.ai.augment_utils import *
 from tools.ai.demo_utils import *

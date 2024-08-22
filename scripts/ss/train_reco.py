@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import datasets
 import wandb
-from singlestage import CSRM, reco
+from csrm import CSRM, reco
 from tools.ai.demo_utils import crf_inference_label, denormalize
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *

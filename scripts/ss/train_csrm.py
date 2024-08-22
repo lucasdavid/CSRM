@@ -15,8 +15,7 @@ from tqdm import tqdm
 
 import datasets
 import wandb
-from singlestage import CSRM, reco, u2pl, data_utils
-from singlestage.mutual_promotion import get_pseudo_label
+from csrm import CSRM, reco, u2pl, data_utils, mutual_promotion
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
 from tools.ai.optim_utils import get_optimizer, linear_schedule
@@ -99,12 +98,6 @@ parser.add_argument('--contra_low_rank', default=3, type=int)
 parser.add_argument('--contra_high_rank', default=20, type=int)
 parser.add_argument('--warmup_epochs', default=1, type=int)
 
-# RECO
-parser.add_argument('--reco_strong_threshold', default=0.97, type=float)
-parser.add_argument('--reco_temp', default=0.5, type=float)
-parser.add_argument('--reco_num_queries', default=256, type=int)
-parser.add_argument('--reco_num_negatives', default=512, type=int)
-
 import cv2
 
 cv2.setNumThreads(0)
@@ -118,7 +111,7 @@ GPUS_COUNT = len(GPUS)
 THRESHOLDS = list(np.arange(0.10, 0.50, 0.05))
 
 
-def train_u2pl(args, wb_run, model_path):
+def train_csrm(args, wb_run, model_path):
   tls = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train)
   tus = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_train_unlabeled)
   vs = datasets.custom_data_source(args.dataset, args.data_dir, args.domain_valid)
@@ -220,7 +213,6 @@ def train_u2pl(args, wb_run, model_path):
   queue_size[0] = 50000
 
   # build prototype
-  # prototype = torch.zeros((num_classes_segm, args.reco_num_queries, 1, 256)).to(DEVICE)
   prototype = None
 
   memory = (memobank, queue_size, queue_ptrlis, prototype)
@@ -437,6 +429,19 @@ def train_step(
   contra_high_rank=20,
   trackers_enabled: bool = True,
 ):
+  cfg_contra = dict(
+    negative_high_entropy=True,
+    low_rank=contra_low_rank,
+    high_rank=contra_high_rank,
+    current_class_threshold=0.3,
+    current_class_negative_threshold=1,
+    unsupervised_entropy_ignore=80,
+    low_entropy_threshold=low_entropy_threshold,
+    num_negatives=50,
+    num_queries=256,
+    temperature=0.5,
+  )
+
   _, images_l, true_labels_l, true_masks_l = batch_l
   _, images_u, true_labels_u, true_masks_u = batch_u
   NL = len(images_l)
@@ -464,7 +469,7 @@ def train_step(
         true_masks = torch.cat((true_masks_l, true_masks_u))
         pseudo_masks = true_masks
       else:
-        pseudo_masks = get_pseudo_label(
+        pseudo_masks = mutual_promotion.get_pseudo_label(
           images_cpu,
           true_labels,
           cams=features_cls_t,
@@ -544,6 +549,8 @@ def train_step(
       label_smoothing(true_labels, ls).to(logit_c.device)
     )
 
+    loss = w_c * loss_c
+
   # (2) Segmentation loss.
   with BlockTimer.scope("loss-segmentation", trackers_enabled):
     pixels_un = pseudo_masks_l == 255
@@ -555,18 +562,19 @@ def train_step(
 
     if samples_valid.sum() == 0:
       # All label maps have only bg or void class.
-      loss_c2s = torch.zeros_like(loss_c)
+      loss_c2s = torch.zeros([])
     else:
       loss_c2s = criterion_c2s(
         logit_seg_large_l[samples_valid],
         pseudo_masks_l[samples_valid].to(logit_seg_large_l.device)
       )
+      loss = loss + w_c2s * loss_c2s
 
   # (3) Mutual Promotion Branches Consistency loss.
   with BlockTimer.scope("loss-mp", trackers_enabled):
     if not w_s2c:
-      loss_s2c = torch.zeros_like(loss_c)
-      conf_pixels_s2c = torch.zeros_like(conf_pixels_c2s)
+      loss_s2c = torch.zeros([])
+      conf_pixels_s2c = torch.zeros([])
     else:
       feats_c = resize_tensor(feats_c, logit_sal.shape[2:], "bilinear", align_corners=True)
       masks_c = torch.cat((logit_sal.to(feats_c), feats_c), dim=1)  # B(C+1)HW
@@ -577,15 +585,16 @@ def train_step(
       pmasks_sal[~conf_pixels_s2c] = 255
 
       loss_s2c = criterion_c2s(masks_c, pmasks_sal.to(masks_c.device))
-
       conf_pixels_s2c = conf_pixels_s2c.float().mean()
+
+      loss = loss + w_s2c * loss_s2c
 
   # (4) Unsupervised Loss.
   with BlockTimer.scope("loss-unsup", trackers_enabled):
     if not w_u:
-      loss_u = torch.zeros_like(loss_c)
+      loss_u = torch.zeros([])
     else:
-      drop_percent = 80
+      drop_percent = cfg_contra["unsupervised_entropy_ignore"]
       percent_unreliable = (100 - drop_percent) * (1 - epoch / max_epochs)
       drop_percent = 100 - percent_unreliable
       loss_u = u2pl.compute_unsupervised_loss(
@@ -595,10 +604,12 @@ def train_step(
         entropy_large_u_t.detach(),
       )
 
+      loss = loss + w_u * loss_u
+
   # (5) Contrastive loss.
   with BlockTimer.scope("loss-contra", trackers_enabled):
     if not w_contra:
-      loss_contra = torch.zeros_like(loss_c)
+      loss_contra = torch.zeros([])
     else:
       alpha_t = low_entropy_threshold * (1 - epoch / max_epochs)
 
@@ -627,19 +638,6 @@ def train_step(
         label_u_small = u2pl.label_onehot(
           F.interpolate(label_seg_u_t.unsqueeze(1), size=pred_hw, mode="nearest").squeeze(1).long(), num_classes)
 
-      cfg_contra = dict(
-        negative_high_entropy=True,
-        low_rank=contra_low_rank,
-        high_rank=contra_high_rank,
-        current_class_threshold=0.3,
-        current_class_negative_threshold=1,
-        unsupervised_entropy_ignore=80,
-        low_entropy_threshold=20,
-        num_negatives=50,
-        num_queries=256,
-        temperature=0.5,
-      )
-
       new_keys, loss_contra = u2pl.compute_contra_memobank_loss(
         rep_all,
         label_l_small,
@@ -657,7 +655,7 @@ def train_step(
         rep_all_t.detach(),
       )
 
-    loss = w_c * loss_c + w_c2s * loss_c2s + w_s2c * loss_s2c + w_u * loss_u + w_contra * loss_contra
+      loss = loss + w_contra * loss_contra
 
   metrics = {
     "loss": loss,
@@ -777,4 +775,4 @@ if __name__ == '__main__':
 
   set_seed(SEED)
 
-  train_u2pl(args, wb_run, model_path)
+  train_csrm(args, wb_run, model_path)

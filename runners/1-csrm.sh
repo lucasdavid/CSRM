@@ -178,7 +178,7 @@ train_reco() {
     --restore $RESTORE;
 }
 
-train_u2pl() {
+train_csrm() {
   echo "=================================================================="
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
@@ -186,7 +186,7 @@ train_u2pl() {
   WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK" \
     WANDB_RUN_GROUP="$DATASET-$ARCH-u2pl" \
     CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/ss/train_u2pl.py \
+    $PY scripts/ss/train_csrm.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
@@ -343,7 +343,7 @@ REST=rs269pnoc
 EID=r1  # Experiment ID
 
 TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-hemfl@$REST-$EID
-train_u2pl
+train_csrm
 
 WEIGHTS=experiments/models/$TAG-best.pth
 PRED_ROOT=experiments/predictions/$TAG
