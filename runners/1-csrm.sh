@@ -102,6 +102,7 @@ C2S_BG=0.05
 C2S_MODE=cam
 
 W_CONTRA=1
+W_S2C=1
 W_U=1
 
 CONTRA_LOW_RANK=3
@@ -195,10 +196,11 @@ train_csrm() {
     --s2c_sigma $S2C_SIGMA \
     --c2s_fg    $C2S_FG \
     --c2s_bg    $C2S_BG \
+    --w_s2c     $W_S2C \
+    --w_u       $W_U \
     --w_contra  $W_CONTRA \
     --contra_low_rank $CONTRA_LOW_RANK \
     --contra_high_rank $CONTRA_HIGH_RANK \
-    --w_u       $W_U \
     --warmup_epochs $WARMUP_EPOCHS \
     --optimizer $OPTIMIZER \
     --lr_alpha_scratch $LR_ALPHA_SCRATCH \
@@ -309,8 +311,8 @@ evaluate_pseudo_masks() {
     --num_workers $WORKERS_INFER;
 }
 
-# region Pascal VOC 2012
-#
+## region Pascal VOC 2012
+##
 # MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
 # ARCHITECTURE=resnest101
 # ARCH=rs101
@@ -320,13 +322,30 @@ evaluate_pseudo_masks() {
 # ARCH=rs269
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # REST=rs269pnoc
-# endregion
+## endregion
 
-# region MS COCO 2014
+## region Ablation
+# W_S2C=1
+# W_U=1
+# W_CONTRA=1
+## endregion
+
+## region MS COCO 2014
+##
+BATCH=16
 MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+VALIDATE_MAX_STEPS=156
 CONTRA_LOW_RANK=3
-CONTRA_HIGH_RANK=6  # 20
-C2S_FG=0.35
+CONTRA_HIGH_RANK=12
+C2S_FG=0.4
+TRAINABLE_BONE=true
+TRAINABLE_STAGE4=false
+LABELSMOOTHING=0
+# MOMENTUM=0
+# NESTEROV=false
+GRAD_MAX_NORM=1.0
+# # S2C_SIGMA=0.75
+# WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 
 ARCHITECTURE=resnest269
 ARCH=rs269
@@ -338,11 +357,13 @@ REST=rs269pnoc
 # REST=rs101cam
 # RESTORE=experiments/models/pnoc/coco14-rs101-pnoc-b32-lr0.05@rs101-r1.pth
 # REST=rs101pnoc
+# RESTORE=experiments/models/puzzle/coco14-640-rs269-p-b16-lr0.05-ls-r1.pth
+# REST=rs269p
 # endregion
 
-EID=r1  # Experiment ID
+EID=r5  # Experiment ID
 
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-hemfl@$REST-$EID
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
 train_csrm
 
 WEIGHTS=experiments/models/$TAG-best.pth
@@ -354,24 +375,23 @@ INF_T=0.4
 # DOMAIN=$DOMAIN_VALID     inference
 # DOMAIN=$DOMAIN_VALID_SEG inference
 
-# region Evaluation
+# region Pseudo segmentation masks
+#
+## MS COCO 2014:
+# PRED_DIR=$PRED_ROOT@train/cams OUTPUT_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_TRAIN make_pseudo_masks
+# PRED_DIR=$PRED_ROOT@val/cams OUTPUT_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_VALID_SEG make_pseudo_masks
+# endregion
 
+# region Evaluation
+#
 # IGNORE_BG_CAM=true
 # EVAL_MODE=png  ## MS COCO 2014
-
+#
 ## Evaluation +dCRF
 # PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10
 # DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
-
+#
 ## Evaluation +dCRF +SAM
 # PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10/pseudos-t$INF_T-c10__max_iou_imp2
 # DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
-
-# endregion
-
-# region Pseudo segmentation masks
-
-# PRED_DIR=$PRED_ROOT@train/cams SAL_DIR=experiments/predictions/$TAG_SAL OUTPUT_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_TRAIN make_pseudo_masks
-# PRED_DIR=$PRED_ROOT@val/cams SAL_DIR=experiments/predictions/$TAG_SAL OUTPUT_DIR=$PRED_ROOT@tval/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_VALID_SEG make_pseudo_masks
-
 # endregion

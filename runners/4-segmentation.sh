@@ -33,8 +33,8 @@ else
 fi
 
 # Dataset
-# DATASET=voc12 # Pascal VOC 2012
-DATASET=coco14  # MS COCO 2014
+DATASET=voc12 # Pascal VOC 2012
+# DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -68,19 +68,19 @@ PRETRAINED_WEIGHTS=imagenet
 
 GROUP_NORM=true
 DILATED=false
-MODE=fix
-TRAIN_STEM=false
+MODE=normal
+TRAIN_STEM=true
 TRAIN_BONE=true
 
 OPTIMIZER=momentum
 # LR=0.01 # SegFormer
 # WD=0.01
 WD=4e-05
-# LR=0.007 # voc12
-LR=0.004  # coco14
+LR=0.007 # voc12
+# LR=0.004  # coco14
 # LR=0.01  # deepglobe
 
-EPOCHS=15
+EPOCHS=50
 
 BATCH_SIZE=32
 ACCUMULATE_STEPS=1
@@ -186,7 +186,7 @@ evaluate_masks() {
 ## 4.1 DeepLabV3+ Training
 ##
 
-LABELSMOOTHING=0.0
+LABELSMOOTHING=0.1
 AUGMENT=none  # colorjitter_randaug_cutmix_mixup_cutormixup
 AUG=no
 
@@ -195,23 +195,25 @@ AUG=no
 # MASKS_DIR=""
 
 ## For custom masks (pseudo masks from WSSS):
-PRIORS_TAG=u2pl-rs101-ccamh-sam
-MASKS_DIR=./experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1_pseudos-t0.4-c10__max_iou_imp2
 
+## Pascal VOC 2012:
+PRIORS_TAG=u2pl-rs101-hemfl-sam
+MASKS_DIR=./experiments/predictions/u2pl/voc12-512-rs101-lr0.007-m0.9-b32-classmix-default-bg0.05-fg0.30-u1-c1-rank3-6-hemfl@rs101p-r1_pseudos-t0.4-c10__max_iou_imp2
+
+## MS COCO 2014:
 # PRIORS_TAG=u2pl-rs269-ccamh-sam
 # MASKS_DIR=./experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1_pseudos-t0.4-c10__max_iou_imp2
 
-# TAG=segmentation/$DATASET-$IMAGE_SIZE-$ARCH-lr$LR-b$BATCH_SIZE-$MODE-$AUG-$PRIORS_TAG
-TAG=segmentation/coco14-640-rs269-lr0.004-b16-fix-u2pl-rs269-ccamh-sam
-# segm_training
+TAG=segmentation/$DATASET-$IMAGE_SIZE-$ARCH-lr$LR-b$BATCH_SIZE-$MODE-$AUG-$PRIORS_TAG
+segm_training
 
 # 4.2 DeepLabV3+ Inference
 #
 
 SEGM_PRED_DIR=./experiments/predictions/$TAG@crf=$CRF_T
-# DOMAIN=$DOMAIN_VALID     segm_inference
+#  DOMAIN=$DOMAIN_VALID     segm_inference
 DOMAIN=$DOMAIN_VALID_SEG segm_inference
-# DOMAIN=$DOMAIN_TEST      SEGM_PRED_DIR=./experiments/predictions/$TAG@test@crf=$CRF_T segm_inference
+DOMAIN=$DOMAIN_TEST      SEGM_PRED_DIR=./experiments/predictions/$TAG@test@crf=$CRF_T segm_inference
 
 # 4.3. Evaluation
 #

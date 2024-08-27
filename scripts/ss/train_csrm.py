@@ -93,6 +93,7 @@ parser.add_argument('--s2c_sigma', default=0.5, type=float)
 parser.add_argument('--c2s_fg', default=0.30, type=float)
 parser.add_argument('--c2s_bg', default=0.05, type=float)
 parser.add_argument('--w_u', default=1, type=float)
+parser.add_argument('--w_s2c', default=1, type=float)
 parser.add_argument('--w_contra', default=1, type=float)
 parser.add_argument('--contra_low_rank', default=3, type=int)
 parser.add_argument('--contra_high_rank', default=20, type=int)
@@ -138,9 +139,9 @@ def train_csrm(args, wb_run, model_path):
     sampler = WeightedRandomSampler(weights, len(train_l_ds), replacement=True, generator=generator)
     shuffle = None
 
-  train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=True)
-  train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=True)
-  valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=True)
+  train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=False)
+  train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=False)
+  valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=False)
   log_dataset(args.dataset, train_l_ds, data_utils.transform, data_utils.transform)
 
   step_val = args.max_steps or len(train_l_loader)
@@ -256,11 +257,14 @@ def train_csrm(args, wb_run, model_path):
         bg_t = args.c2s_bg
 
         if args.warmup_epochs and epoch < args.warmup_epochs:
-          w_s2c = 0
+          w_s2c  = 0
           w_u = 0
           w_contra = 0
         else:
-          w_s2c = linear_schedule(epoch, args.max_epoch, 0.1, 1.0, 1.0)
+          if args.w_s2c:
+            w_s2c = linear_schedule(epoch-args.warmup_epochs, args.max_epoch-args.warmup_epochs, 0.1, args.w_s2c, 1.0)
+          else:
+            w_s2c = 0
           w_u = args.w_u
           w_contra = args.w_contra
 
