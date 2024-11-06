@@ -92,8 +92,10 @@ parser.add_argument('--c2s_sigma', default=0.5, type=float)
 parser.add_argument('--s2c_sigma', default=0.5, type=float)
 parser.add_argument('--c2s_fg', default=0.30, type=float)
 parser.add_argument('--c2s_bg', default=0.05, type=float)
+parser.add_argument('--w_c', default=1, type=float)
 parser.add_argument('--w_u', default=1, type=float)
 parser.add_argument('--w_s2c', default=1, type=float)
+parser.add_argument('--w_c2s', default=1, type=float)
 parser.add_argument('--w_contra', default=1, type=float)
 parser.add_argument('--contra_low_rank', default=3, type=int)
 parser.add_argument('--contra_high_rank', default=20, type=int)
@@ -252,7 +254,6 @@ def train_csrm(args, wb_run, model_path):
         c2s_sigma = args.c2s_sigma
 
         # Default
-        w_c = w_c2s = 1
         fg_t = args.c2s_fg
         bg_t = args.c2s_bg
 
@@ -282,8 +283,8 @@ def train_csrm(args, wb_run, model_path):
             memory,
             thresholds=(bg_t, fg_t),
             ls=args.label_smoothing,
-            w_c=w_c,
-            w_c2s=w_c2s,
+            w_c=args.w_c,
+            w_c2s=args.w_c2s,
             w_s2c=w_s2c,
             w_u=w_u,
             w_contra=w_contra,
@@ -306,23 +307,23 @@ def train_csrm(args, wb_run, model_path):
         scaler.scale(loss / args.accumulate_steps).backward()
 
         if (step + 1) % args.accumulate_steps == 0:
-            if args.grad_max_norm:
-              scaler.unscale_(optimizer)
-              torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_max_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+          if args.grad_max_norm:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_max_norm)
+          scaler.step(optimizer)
+          scaler.update()
+          optimizer.zero_grad()
 
-            with torch.no_grad():
-              if epoch <= args.warmup_epochs:
-                for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                  t_params.copy_(s_params)
-              else:
-                ema_decay_origin = 0.99
-                warmup_steps = args.warmup_epochs * step_val / args.accumulate_steps
-                ema_decay = min(1 - 1 / (1 + optimizer.global_step - warmup_steps), ema_decay_origin)
-                for t_params, s_params in zip(teacher.parameters(), model.parameters()):
-                  t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
+          with torch.no_grad():
+            if epoch <= args.warmup_epochs:
+              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
+                t_params.copy_(s_params)
+            else:
+              ema_decay_origin = 0.99
+              warmup_steps = args.warmup_epochs * step_val / args.accumulate_steps
+              ema_decay = min(1 - 1 / (1 + optimizer.global_step - warmup_steps), ema_decay_origin)
+              for t_params, s_params in zip(teacher.parameters(), model.parameters()):
+                t_params.copy_(ema_decay * t_params + (1 - ema_decay) * s_params)
 
         train_meter.update({m: v.item() for m, v in metrics.items()})
 
@@ -564,7 +565,7 @@ def train_step(
 
     conf_pixels_c2s = (~pixels_un.cpu()).float().mean()
 
-    if samples_valid.sum() == 0:
+    if not w_c2s or samples_valid.sum() == 0:
       # All label maps have only bg or void class.
       loss_c2s = torch.zeros([])
     else:

@@ -36,8 +36,8 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-# DATASET=voc12  # Pascal VOC 2012
-DATASET=coco14  # MS COCO 2014
+DATASET=voc12  # Pascal VOC 2012
+# DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
 
 . $WORK_DIR/runners/config/env.sh
@@ -102,6 +102,7 @@ C2S_BG=0.05
 C2S_MODE=cam
 
 W_CONTRA=1
+W_C2S=1
 W_S2C=1
 W_U=1
 
@@ -111,6 +112,7 @@ CONTRA_HIGH_RANK=6  # 20
 # Evaluation
 MIN_TH=0.05
 MAX_TH=0.81
+THRESHOLD=0
 CRF_T=10
 CRF_GT=0.7
 EVAL_MODE=npy
@@ -118,6 +120,8 @@ KIND=cams
 # KIND=masks
 IGNORE_BG_CAM=false
 
+SCALES=0.5,1.0,1.5,2.0
+HFLIP=true
 
 train_reco() {
   echo "=================================================================="
@@ -125,10 +129,10 @@ train_reco() {
   echo "=================================================================="
 
   WANDB_TAGS="$DATASET,$ARCH,reco,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,s2c:$S2C_MODE,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS" \
-    WANDB_RUN_GROUP="$DATASET-$ARCH-reco" \
-    CUDA_VISIBLE_DEVICES=$DEVICES \
-    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 \
-    $PY scripts/ss/train_reco.py \
+  WANDB_RUN_GROUP="$DATASET-$ARCH-reco" \
+  CUDA_VISIBLE_DEVICES=$DEVICES \
+  PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 \
+  $PY scripts/ss/train_reco.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
@@ -185,9 +189,9 @@ train_csrm() {
   echo "=================================================================="
 
   WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK" \
-    WANDB_RUN_GROUP="$DATASET-$ARCH-u2pl" \
-    CUDA_VISIBLE_DEVICES=$DEVICES \
-    $PY scripts/ss/train_csrm.py \
+  WANDB_RUN_GROUP="$DATASET-$ARCH-csrm" \
+  CUDA_VISIBLE_DEVICES=$DEVICES \
+  $PY scripts/ss/train_csrm.py \
     --tag $TAG \
     --lr $LR \
     --wd $WD \
@@ -196,6 +200,7 @@ train_csrm() {
     --s2c_sigma $S2C_SIGMA \
     --c2s_fg    $C2S_FG \
     --c2s_bg    $C2S_BG \
+    --w_c2s     $W_C2S \
     --w_s2c     $W_S2C \
     --w_u       $W_U \
     --w_contra  $W_CONTRA \
@@ -264,12 +269,14 @@ inference() {
     --domain $DOMAIN \
     --data_dir $DATA_DIR \
     --device $DEVICE \
-    --save_cams false \
-    --save_masks false \
+    --save_cams true \
+    --save_masks true \
     --save_pseudos true \
     --threshold $INF_T \
     --crf_t $CRF_T \
-    --crf_gt_prob $CRF_GT
+    --crf_gt_prob $CRF_GT \
+    --scales $SCALES \
+    --hflip $HFLIP;
 }
 
 make_pseudo_masks() {
@@ -306,51 +313,55 @@ evaluate_pseudo_masks() {
     --data_dir $DATA_DIR \
     --min_th $MIN_TH \
     --max_th $MAX_TH \
+    --threshold "$THRESHOLD" \
     --mode $EVAL_MODE \
     --ignore_bg_cam $IGNORE_BG_CAM \
     --num_workers $WORKERS_INFER;
 }
 
-## region Pascal VOC 2012
-##
-# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-# ARCHITECTURE=resnest101
-# ARCH=rs101
-# RESTORE=experiments/models/puzzle/rs101p.pth
-# REST=rs101p
+# region Pascal VOC 2012
+#
+MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+ARCHITECTURE=resnest101
+ARCH=rs101
+RESTORE=experiments/models/puzzle/rs101p.pth
+REST=rs101p
 # ARCHITECTURE=resnest269
 # ARCH=rs269
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # REST=rs269pnoc
-## endregion
+# endregion
 
 ## region Ablation
+# W_C2S=1
 # W_S2C=1
 # W_U=1
 # W_CONTRA=1
+SCALES=1.0
+HFLIP=false
 ## endregion
 
 ## region MS COCO 2014
 ##
-BATCH=16
-MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
-VALIDATE_MAX_STEPS=156
-CONTRA_LOW_RANK=3
-CONTRA_HIGH_RANK=12
-C2S_FG=0.4
-TRAINABLE_BONE=true
-TRAINABLE_STAGE4=false
-LABELSMOOTHING=0
-# MOMENTUM=0
-# NESTEROV=false
-GRAD_MAX_NORM=1.0
-# # S2C_SIGMA=0.75
-# WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
+# BATCH=16
+# MAX_STEPS=256   # ceil(10% of (82783 (coco14 train samples) / 32)).
+# VALIDATE_MAX_STEPS=156
+# CONTRA_LOW_RANK=3
+# CONTRA_HIGH_RANK=12
+# C2S_FG=0.4
+# TRAINABLE_BONE=true
+# TRAINABLE_STAGE4=false
+# LABELSMOOTHING=0
+# # MOMENTUM=0
+# # NESTEROV=false
+# GRAD_MAX_NORM=1.0
+# # # S2C_SIGMA=0.75
+# # WARMUP_EPOCHS=1  # min pixel confidence (conf_p := max_class(prob)_pixel >= S2C_SIGMA)
 
-ARCHITECTURE=resnest269
-ARCH=rs269
-RESTORE=experiments/models/pnoc/coco14-rs269-pnoc-b16-a2-lr0.05-ls0-ow0.0-1.0-1.0-c0.2-is1@rs269ra-r1.pth
-REST=rs269pnoc
+# ARCHITECTURE=resnest269
+# ARCH=rs269
+# RESTORE=experiments/models/pnoc/coco14-rs269-pnoc-b16-a2-lr0.05-ls0-ow0.0-1.0-1.0-c0.2-is1@rs269ra-r1.pth
+# REST=rs269pnoc
 # ARCHITECTURE=resnest101
 # ARCH=rs101
 # RESTORE=experiments/models/vanilla/coco14-rs101-lr0.05-r1.pth
@@ -361,37 +372,47 @@ REST=rs269pnoc
 # REST=rs269p
 # endregion
 
-EID=r5  # Experiment ID
+EID=r1  # Experiment ID
 
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
 train_csrm
 
-WEIGHTS=experiments/models/$TAG-best.pth
+WEIGHTS=experiments/models/$TAG.pth
 PRED_ROOT=experiments/predictions/$TAG
 
 INF_T=0.4
 
 # DOMAIN=$DOMAIN_TRAIN inference
-# DOMAIN=$DOMAIN_VALID     inference
-# DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
+
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-masks      PRED_DIR=$PRED_ROOT@train/masks CRF_T=0 IGNORE_BG_CAM=true evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-masks@val  PRED_DIR=$PRED_ROOT@val/masks   CRF_T=0 IGNORE_BG_CAM=true evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-masks      PRED_DIR=$PRED_ROOT@train/masks CRF_T=0 THRESHOLD=0.5 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-masks@val  PRED_DIR=$PRED_ROOT@val/masks   CRF_T=0 THRESHOLD=0.5 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
 
 # region Pseudo segmentation masks
 #
 ## MS COCO 2014:
-# PRED_DIR=$PRED_ROOT@train/cams OUTPUT_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_TRAIN make_pseudo_masks
-# PRED_DIR=$PRED_ROOT@val/cams OUTPUT_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T DOMAIN=$DOMAIN_VALID_SEG make_pseudo_masks
+# EVAL_MODE=png  # npy takes too much space for 120k samples.
+# DOMAIN=$DOMAIN_TRAIN     PRED_DIR=$PRED_ROOT@train/cams OUTPUT_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T make_pseudo_masks
+# DOMAIN=$DOMAIN_VALID_SEG PRED_DIR=$PRED_ROOT@val/cams   OUTPUT_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   make_pseudo_masks
 # endregion
 
-# region Evaluation
-#
+# # region Evaluation
+
 # IGNORE_BG_CAM=true
-# EVAL_MODE=png  ## MS COCO 2014
-#
-## Evaluation +dCRF
+
+# # Evaluation +dCRF
 # PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10
 # DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
-#
-## Evaluation +dCRF +SAM
+
+# # Evaluation +dCRF +SAM
 # PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c10/pseudos-t$INF_T-c10__max_iou_imp2
 # DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG@val evaluate_pseudo_masks
-# endregion
+# # endregion

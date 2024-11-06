@@ -51,6 +51,7 @@ parser.add_argument('--tag', default='', type=str)
 parser.add_argument('--weights', default='', type=str)
 parser.add_argument('--domain', default='train', type=str)
 parser.add_argument('--scales', default='0.5,1.0,1.5,2.0', type=str)
+parser.add_argument('--hflip', default=True, type=str2bool)
 parser.add_argument('--exclude_bg_images', default=False, type=str2bool)
 
 
@@ -95,9 +96,9 @@ def run(args):
   scales = [float(scale) for scale in args.scales.split(',')]
 
   if GPUS_COUNT > 1:
-    multiprocessing.spawn(_work, nprocs=GPUS_COUNT, args=(model, dataset, scales, PREDS_DIR, DEVICE, args), join=True)
+    multiprocessing.spawn(_work, nprocs=GPUS_COUNT, args=(model, dataset, scales, args.hflip, PREDS_DIR, DEVICE, args), join=True)
   else:
-    _work(0, model, dataset, scales, PREDS_DIR, DEVICE, args)
+    _work(0, model, dataset, scales, args.hflip, PREDS_DIR, DEVICE, args)
 
 
 def _work(
@@ -105,6 +106,7 @@ def _work(
     model: Classifier,
     dataset: List[datasets.PathsDataset],
     scales: List[float],
+    hflip: bool,
     preds_dir: str,
     device: str,
     args: "Namespace",
@@ -141,7 +143,7 @@ def _work(
         cams_st = np.zeros((0, *strided_size))
         cams_hr = np.zeros((0, *strided_up_size))
       else:
-        cams, masks = zip(*(forward_tta(model, image, scale, device, args.save_masks) for scale in scales))
+        cams, masks = zip(*(forward_tta(model, image, scale, hflip, device, args.save_masks) for scale in scales))
 
         cams_st = [resize_tensor(c.unsqueeze(0), strided_size)[0] for c in cams]
         cams_st = torch.sum(torch.stack(cams_st), dim=0)
@@ -198,7 +200,7 @@ def _work(
         safe_save(seg_path, {"keys": keys, "hr_cam": to_numpy(masks)})
 
 
-def forward_tta(model, ori_image, scale, DEVICE, with_mask=True):
+def forward_tta(model, ori_image, scale, hflip, DEVICE, with_mask=True):
   W, H = ori_image.size
 
   # Preprocessing
@@ -207,20 +209,25 @@ def forward_tta(model, ori_image, scale, DEVICE, with_mask=True):
   x = normalize_fn(x)
   x = x.transpose((2, 0, 1))
   x = torch.from_numpy(x)
-  xf = x.flip(-1)
-  images = torch.stack([x, xf])
+  images = torch.stack([x, x.flip(-1)]) if hflip else x[None, ...]
   images = images.to(DEVICE)
 
   outputs = model(images, with_cam=True, with_mask=True, with_rep=False)
   features = outputs["features_c"]
   cams = F.relu(features)
-  cams = cams[0] + cams[1].flip(-1)
+  if hflip:
+    cams = cams[0] + cams[1].flip(-1)
+  else:
+    cams = cams[0]
 
   masks = None
 
   if with_mask:
     masks = outputs["masks_seg_large"].cpu().float()
-    masks = masks[0] + masks[1].flip(-1)
+    if hflip:
+      masks = masks[0] + masks[1].flip(-1)
+    else:
+      masks = masks[0]
 
   return cams, masks
 
@@ -241,6 +248,8 @@ if __name__ == '__main__':
   SEED = args.seed
   TAG = args.tag
   TAG += '@train' if 'train' in args.domain else '@val'
+
+  log_config(vars(args), TAG)
 
   PREDS_DIR = args.pred_dir or f'./experiments/predictions/{TAG}/'
   WEIGHTS_PATH = args.weights or os.path.join('./experiments/models/', f'{args.tag}.pth')
