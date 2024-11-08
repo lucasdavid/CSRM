@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.utils.data.sampler as sampler
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as transforms_f
-from PIL import Image, ImageFilter
+from PIL import ImageFilter
 
 import datasets
 
@@ -28,10 +28,10 @@ def transform(
 
   scale_ratio = random.uniform(scale_size[0], scale_size[1])
   resized_size = (int(raw_h * scale_ratio), int(raw_w * scale_ratio))
-  image = transforms_f.resize(image, resized_size, Image.BILINEAR)
-  label = transforms_f.resize(label, resized_size, Image.NEAREST)
+  image = transforms_f.resize(image, resized_size)
+  label = transforms_f.resize(label, resized_size, transforms.InterpolationMode.NEAREST)
   if logits is not None:
-    logits = transforms_f.resize(logits, resized_size, Image.NEAREST)
+    logits = transforms_f.resize(logits, resized_size)
 
   # Add padding if rescaled image size is less than crop size
   if crop_size == -1:  # use original im size without crop or padding
