@@ -257,6 +257,8 @@ def train_csrm(args, wb_run, model_path):
         fg_t = args.c2s_fg
         bg_t = args.c2s_bg
 
+        w_c2s = args.w_c2s
+
         if args.warmup_epochs and epoch < args.warmup_epochs:
           w_s2c  = 0
           w_u = 0
@@ -284,7 +286,7 @@ def train_csrm(args, wb_run, model_path):
             thresholds=(bg_t, fg_t),
             ls=args.label_smoothing,
             w_c=args.w_c,
-            w_c2s=args.w_c2s,
+            w_c2s=w_c2s,
             w_s2c=w_s2c,
             w_u=w_u,
             w_contra=w_contra,

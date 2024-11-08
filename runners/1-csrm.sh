@@ -1,9 +1,10 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=48
+#SBATCH --gpus=4
 #SBATCH -p sequana_gpu_shared
 #SBATCH -J ss-train
-#SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-%j.out
+#SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-ablation-%j.out
 #SBATCH --time=24:00:00
 
 # Copyright 2023 Lucas Oliveira David
@@ -270,8 +271,8 @@ inference() {
     --data_dir $DATA_DIR \
     --device $DEVICE \
     --save_cams true \
-    --save_masks true \
-    --save_pseudos true \
+    --save_masks false \
+    --save_pseudos false \
     --threshold $INF_T \
     --crf_t $CRF_T \
     --crf_gt_prob $CRF_GT \
@@ -372,28 +373,84 @@ HFLIP=false
 # REST=rs269p
 # endregion
 
-EID=r1  # Experiment ID
-
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
-train_csrm
-
-WEIGHTS=experiments/models/$TAG.pth
-PRED_ROOT=experiments/predictions/$TAG
-
+EID=r2  # Experiment ID
 INF_T=0.4
 
-# DOMAIN=$DOMAIN_TRAIN inference
+W_C2S=0
+W_S2C=0
+W_U=0
+W_CONTRA=0
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+train_csrm
+WEIGHTS=experiments/models/$TAG.pth
+PRED_ROOT=experiments/predictions/$TAG
 DOMAIN=$DOMAIN_VALID     inference
 DOMAIN=$DOMAIN_VALID_SEG inference
-
 DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-masks      PRED_DIR=$PRED_ROOT@train/masks CRF_T=0 IGNORE_BG_CAM=true evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-masks@val  PRED_DIR=$PRED_ROOT@val/masks   CRF_T=0 IGNORE_BG_CAM=true evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-masks      PRED_DIR=$PRED_ROOT@train/masks CRF_T=0 THRESHOLD=0.5 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-masks@val  PRED_DIR=$PRED_ROOT@val/masks   CRF_T=0 THRESHOLD=0.5 evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
+W_C2S=1
+W_S2C=0
+W_U=0
+W_CONTRA=0
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+train_csrm
+WEIGHTS=experiments/models/$TAG.pth
+PRED_ROOT=experiments/predictions/$TAG
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
+W_C2S=1
+W_S2C=1
+W_U=0
+W_CONTRA=0
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+train_csrm
+WEIGHTS=experiments/models/$TAG.pth
+PRED_ROOT=experiments/predictions/$TAG
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
+W_C2S=1
+W_S2C=1
+W_U=1
+W_CONTRA=0
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+# train_csrm
+WEIGHTS=experiments/models/$TAG.pth
+PRED_ROOT=experiments/predictions/$TAG
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
+W_C2S=1
+W_S2C=1
+W_U=1
+W_CONTRA=1
+TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+# train_csrm
+WEIGHTS=experiments/models/$TAG.pth
+PRED_ROOT=experiments/predictions/$TAG
+DOMAIN=$DOMAIN_VALID     inference
+DOMAIN=$DOMAIN_VALID_SEG inference
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+
 
 
 # region Pseudo segmentation masks
