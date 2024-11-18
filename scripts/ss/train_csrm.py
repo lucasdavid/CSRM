@@ -1,7 +1,7 @@
 import argparse
-from copy import deepcopy
 import os
 import time
+from copy import deepcopy
 from functools import partial
 from multiprocessing import Pool
 from typing import List
@@ -15,15 +15,16 @@ from tqdm import tqdm
 
 import datasets
 import wandb
-from csrm import CSRM, reco, u2pl, data_utils, mutual_promotion
+from csrm import CSRM, mutual_promotion, reco, u2pl
+from tools.ai.augment_utils import *
 from tools.ai.evaluate_utils import *
 from tools.ai.log_utils import *
-from tools.ai.optim_utils import get_optimizer, linear_schedule
+from tools.ai.optim_utils import (OPTIMIZERS_NAMES, get_optimizer,
+                                  linear_schedule)
 from tools.ai.torch_utils import *
 from tools.general import wandb_utils
 from tools.general.io_utils import create_directory, str2bool
 from tools.general.time_utils import *
-from tools.ai.augment_utils import *
 
 parser = argparse.ArgumentParser()
 
@@ -32,6 +33,7 @@ parser.add_argument('--print_ratio', default=0.1, type=float)
 parser.add_argument('--progress', default=True, type=str2bool)
 parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--seed', default=0, type=int)
+parser.add_argument('--sampler_seed', default=135, type=int)
 parser.add_argument('--num_workers', default=8, type=int)
 
 # Dataset
@@ -40,7 +42,7 @@ parser.add_argument('--data_dir', required=True, type=str)
 parser.add_argument('--domain_train', default=None, type=str)
 parser.add_argument('--domain_train_unlabeled', default=None, type=str)
 parser.add_argument('--domain_valid', default=None, type=str)
-parser.add_argument('--sampler', default="default", type=str, choices=["default", "balanced"])
+parser.add_argument('--sampler', default="default", type=str, choices=datasets.SAMPLERS)
 
 # Network
 parser.add_argument('--architecture', default='resnet50', type=str)
@@ -70,7 +72,7 @@ parser.add_argument('--validate_thresholds', default=None, type=str)
 parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--wd', default=1e-4, type=float)
 parser.add_argument('--label_smoothing', default=0, type=float)
-parser.add_argument('--optimizer', default="sgd", choices=["sgd", "adamw", "lion"])
+parser.add_argument('--optimizer', default="sgd", choices=OPTIMIZERS_NAMES)
 parser.add_argument('--momentum', default=0, type=float)
 parser.add_argument('--nesterov', default=False, type=str2bool)
 parser.add_argument('--lr_poly_power', default=0.9, type=float)
@@ -121,30 +123,21 @@ def train_csrm(args, wb_run, model_path):
 
   crop_size = [args.image_size] * 2
   scale_size = (args.min_image_size / args.image_size, args.max_image_size / args.image_size)
-  aug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=scale_size, augmentation=True)
-  noaug_transform = partial(data_utils.transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False)
+
+  aug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=scale_size, augmentation=True)
+  noaug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False)
 
   train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform, ignore_bg_images=True)
   train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform, ignore_bg_images=True)
   valid_ds = datasets.SegmentationDataset(vs, transform=noaug_transform)
 
-  if args.sampler == "default":
-    sampler = None
-    shuffle = True
-  else:
-    from sklearn.utils import compute_sample_weight
-    from torch.utils.data import WeightedRandomSampler
-    labels = np.asarray([tls.get_label(_id) for _id in tls.sample_ids])
-    weights = compute_sample_weight("balanced", labels)
-    generator = torch.Generator()
-    generator.manual_seed(args.seed + 153)
-    sampler = WeightedRandomSampler(weights, len(train_l_ds), replacement=True, generator=generator)
-    shuffle = None
+  sampler, shuffle = datasets.get_train_sampler_and_shuffler(args.sampler, tls, seed=args.sampler_seed)
 
-  train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, sampler=sampler, shuffle=shuffle, drop_last=True, pin_memory=False)
-  train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, drop_last=True, pin_memory=False)
-  valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, pin_memory=False)
-  log_dataset(args.dataset, train_l_ds, data_utils.transform, data_utils.transform)
+  train_l_loader = DataLoader(train_l_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, shuffle=shuffle, sampler=sampler)
+  train_u_loader = DataLoader(train_u_ds, batch_size=args.batch_size, num_workers=args.num_workers, drop_last=True, shuffle=True)
+  valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, num_workers=args.num_workers)
+  log_dataset(args.dataset, train_l_ds, datasets.batch_transform, datasets.batch_transform)
+  log_loader(train_l_loader, tls, check_sampler=True)
 
   step_val = args.max_steps or len(train_l_loader)
   step_log = max(int(step_val * args.print_ratio), 1)
@@ -372,10 +365,11 @@ def train_csrm(args, wb_run, model_path):
           break
 
       valid_model = model if epoch <= args.warmup_epochs else teacher
-      miou_best, improved = valid_loop(valid_model, valid_loader, tls, epoch, optimizer, miou_best)
-      save_model(valid_model, model_path, parallel=GPUS_COUNT > 1)
+      if do_validation:
+        miou_best, improved = valid_loop(valid_model, valid_loader, tls, epoch, optimizer, miou_best)
 
-      if improved:
+      save_model(valid_model, model_path, parallel=GPUS_COUNT > 1)
+      if do_validation and improved:
         save_model(valid_model, f"./experiments/models/{TAG}-best.pth", parallel=GPUS_COUNT > 1)
 
   except KeyboardInterrupt:
@@ -494,7 +488,7 @@ def train_step(
           true_labels,
           pseudo_masks,
           logit_seg_large_t,
-        ) = data_utils.mixaug(
+        ) = datasets.batch_mixaug_pt(
           images,
           true_labels,
           pseudo_masks,
