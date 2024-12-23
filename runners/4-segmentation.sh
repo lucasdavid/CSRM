@@ -197,12 +197,12 @@ AUG=no
 ## For custom masks (pseudo masks from WSSS):
 
 ## Pascal VOC 2012:
-PRIORS_TAG=u2pl-rs101-hemfl-sam
-MASKS_DIR=./experiments/predictions/u2pl/voc12-512-rs101-lr0.007-m0.9-b32-classmix-default-bg0.05-fg0.30-u1-c1-rank3-6-hemfl@rs101p-r1_pseudos-t0.4-c10__max_iou_imp2
+PRIORS_TAG=csrm-rs101-hemfl-sam
+MASKS_DIR=./experiments/predictions/csrm/voc12-512-rs101-lr0.007-m0.9-b32-classmix-default-bg0.05-fg0.30-u1-c1-rank3-6-hemfl@rs101p-r1_pseudos-t0.4-c10__max_iou_imp2
 
 ## MS COCO 2014:
-# PRIORS_TAG=u2pl-rs269-ccamh-sam
-# MASKS_DIR=./experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1_pseudos-t0.4-c10__max_iou_imp2
+# PRIORS_TAG=csrm-rs269-ccamh-sam
+# MASKS_DIR=./experiments/predictions/csrm/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1_pseudos-t0.4-c10__max_iou_imp2
 
 TAG=segmentation/$DATASET-$IMAGE_SIZE-$ARCH-lr$LR-b$BATCH_SIZE-$MODE-$AUG-$PRIORS_TAG
 segm_training
@@ -219,4 +219,3 @@ DOMAIN=$DOMAIN_TEST      SEGM_PRED_DIR=./experiments/predictions/$TAG@test@crf=$
 #
 # DOMAIN=$DOMAIN_VALID     evaluate_masks
 DOMAIN=$DOMAIN_VALID_SEG evaluate_masks
-

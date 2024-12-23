@@ -121,8 +121,10 @@ KIND=cams
 # KIND=masks
 IGNORE_BG_CAM=false
 
-SCALES=0.5,1.0,1.5,2.0
-HFLIP=true
+SCALES=1.0
+HFLIP=false
+# SCALES=0.5,1.0,1.5,2.0
+# HFLIP=true
 
 train_reco() {
   echo "=================================================================="
@@ -189,7 +191,7 @@ train_csrm() {
   echo "[train $TAG] started at $(date +'%Y-%m-%d %H:%M:%S')."
   echo "=================================================================="
 
-  WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK" \
+  WANDB_TAGS="$DATASET,$ARCH,csrm,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK" \
   WANDB_RUN_GROUP="$DATASET-$ARCH-csrm" \
   CUDA_VISIBLE_DEVICES=$DEVICES \
   $PY scripts/ss/train_csrm.py \
@@ -304,7 +306,7 @@ evaluate_pseudo_masks() {
   # referencing the DenseCRF's parameters used to generate the segmentation proposals.
   # DenseCRF will not be re-run during `evaluation` (crf_t=0).
   #
-  WANDB_TAGS="$DATASET,$ARCH,u2pl,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK,domain:$DOMAIN,crf:$CRF_T-$CRF_GT,t:$INF_T" \
+  WANDB_TAGS="$DATASET,$ARCH,csrm,aug:$AUGMENT,lr:$LR,wd:$WD,ls:$LABELSMOOTHING,b:$BATCH,ac:$ACCUMULATE_STEPS,c2s:$C2S_MODE,warmup:$WARMUP_EPOCHS,s:$SAMPLER,rank:$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK,domain:$DOMAIN,crf:$CRF_T-$CRF_GT,t:$INF_T" \
   CUDA_VISIBLE_DEVICES="" \
   $PY scripts/evaluate.py \
     --experiment_name $TAG \
@@ -332,15 +334,6 @@ REST=rs101p
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
 # REST=rs269pnoc
 # endregion
-
-## region Ablation
-# W_C2S=1
-# W_S2C=1
-# W_U=1
-# W_CONTRA=1
-SCALES=1.0
-HFLIP=false
-## endregion
 
 ## region MS COCO 2014
 ##
@@ -373,14 +366,10 @@ HFLIP=false
 # REST=rs269p
 # endregion
 
-EID=r2  # Experiment ID
+EID=r1  # Experiment ID
 INF_T=0.4
 
-W_C2S=0
-W_S2C=0
-W_U=0
-W_CONTRA=0
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+TAG=csrm/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
 train_csrm
 WEIGHTS=experiments/models/$TAG.pth
 PRED_ROOT=experiments/predictions/$TAG
@@ -391,11 +380,7 @@ DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF
 DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
 
-W_C2S=1
-W_S2C=0
-W_U=0
-W_CONTRA=0
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
+TAG=csrm/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
 train_csrm
 WEIGHTS=experiments/models/$TAG.pth
 PRED_ROOT=experiments/predictions/$TAG
@@ -405,53 +390,6 @@ DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF
 DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
 DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
-
-W_C2S=1
-W_S2C=1
-W_U=0
-W_CONTRA=0
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
-train_csrm
-WEIGHTS=experiments/models/$TAG.pth
-PRED_ROOT=experiments/predictions/$TAG
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
-
-W_C2S=1
-W_S2C=1
-W_U=1
-W_CONTRA=0
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
-# train_csrm
-WEIGHTS=experiments/models/$TAG.pth
-PRED_ROOT=experiments/predictions/$TAG
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
-
-W_C2S=1
-W_S2C=1
-W_U=1
-W_CONTRA=1
-TAG=u2pl/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
-# train_csrm
-WEIGHTS=experiments/models/$TAG.pth
-PRED_ROOT=experiments/predictions/$TAG
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
-
-
 
 # region Pseudo segmentation masks
 #

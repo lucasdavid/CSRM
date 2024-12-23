@@ -221,13 +221,13 @@ evaluate_saliency_detection() {
 ##
 ARCHITECTURE=resnest101
 ARCH=rs101
-CAMS_DIR=experiments/predictions/u2pl/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1@train/cams
-PRIORS_TAG=rs101u2pl@rs101p
+CAMS_DIR=experiments/predictions/csrm/voc12-rs101-lr0.007-m0.9-b32-classmix-ls-sdefault-u1-c1-r1@train/cams
+PRIORS_TAG=rs101csrm@rs101p
 
 # ARCHITECTURE=resnest269
 # ARCH=rs269
-# CAMS_DIR=experiments/predictions/u2pl/voc12-rs269-lr0.1-m0-b16-classmix-ls-sdefault-bg0.05-fg0.40-u1-c1-r1@train/cams
-# PRIORS_TAG=rs269u2pl@rs269pnoc
+# CAMS_DIR=experiments/predictions/csrm/voc12-rs269-lr0.1-m0-b16-classmix-ls-sdefault-bg0.05-fg0.40-u1-c1-r1@train/cams
+# PRIORS_TAG=rs269csrm@rs269pnoc
 
 FG_T=0.4
 INF_FG_T=0.5
@@ -238,9 +238,9 @@ INF_FG_T=0.5
 # FG_T=0.3
 # LR=0.0005
 
-# CAMS_DIR=experiments/predictions/u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@train/pseudos-t0.4-c10
+# CAMS_DIR=experiments/predictions/csrm/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1@train/pseudos-t0.4-c10
 # CAMS_MODE=png
-# PRIORS_TAG=rs269u2pl@rs269pnoc-r1
+# PRIORS_TAG=rs269csrm@rs269pnoc-r1
 ## ================================================
 
 CCAMH_TAG=saliency/$DATASET-ccamh-$ARCH-fg$FG_T-lr$LR-b$BATCH_SIZE@$PRIORS_TAG

@@ -43,29 +43,35 @@ DATASET=voc12  # Pascal VOC 2012
 . $WORK_DIR/runners/config/env.sh
 . $WORK_DIR/runners/config/dataset.sh
 
+
+## region Segment Anything (Generate binary masks).
+
 cd $WORK_DIR/../segment-anything
 export PYTHONPATH=$(pwd)
 
 echo "segment-anything/scripts-amg"
 echo "=================================================="
 
-# $PIP install -e .
+$PIP install -e .
 
-# for INDEX in $(seq 0 3)
-# do
-#   echo "Enqueuing segment-anything/scripts-amg"
-#   echo "=================================================="
-# INDEX=0
-# CUDA_VISIBLE_DEVICES=$INDEX \
-# $PY scripts/amg.py \
-#   --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
-#   --input $DATA_DIR/JPEGImages \
-#   --output ../SAM_WSSS/SAM/voc12/ &
-# done
+for INDEX in $(seq 0 3)
+do
+  echo "Enqueuing segment-anything/scripts-amg"
+  echo "=================================================="
+INDEX=0
+CUDA_VISIBLE_DEVICES=$INDEX \
+$PY scripts/amg.py \
+  --checkpoint ./models/sam_vit_h_4b8939.pth --model-type vit_h \
+  --input $DATA_DIR/JPEGImages \
+  --output ../SAM_WSSS/SAM/voc12/ &
+done
+echo "Waiting for jobs to finish..."
+wait
+echo "All queued segment-anything jobs completed."
+## endregion
 
-# echo "Waiting for jobs to finish..."
-# wait
-# echo "All queued segment-anything jobs completed."
+
+## region SAM-WSSS (Align priors with SAM masks).
 
 cd ../SAM_WSSS
 
@@ -76,11 +82,11 @@ echo "================================"
 PRED_ROOT=../experiments/predictions
 
 ## Pascal VOC 2012:
-TAG=u2pl/voc12-512-rs101-lr0.007-m0.9-b32-classmix-default-bg0.05-fg0.30-u1-c1-rank3-6-hemfl@rs101p-r1
+TAG=csrm/voc12-512-rs101-lr0.007-m0.9-b32-classmix-default-bg0.05-fg0.30-u1-c1-rank3-6-hemfl@rs101p-r1
 CLASSES=21
 
 ### MS COCO 2014:
-# TAG=u2pl/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1
+# TAG=csrm/coco14-640-rs269-lr0.007-m0.9-b32-colorjitter_classmix-default-bg0.05-fg0.35-u1-c1@rs269pnoc-r1
 # CLASSES=81
 
 PSEUDO_PATH=$PRED_ROOT/$TAG@train/pseudos-t0.4-c10
@@ -88,3 +94,4 @@ $PY main.py --number_class $CLASSES --pseudo_path $PSEUDO_PATH --sam_path SAM/vo
 PSEUDO_PATH=$PRED_ROOT/$TAG@val/pseudos-t0.4-c10
 $PY main.py --number_class $CLASSES --pseudo_path $PSEUDO_PATH --sam_path SAM/voc12/
 
+## endregion
