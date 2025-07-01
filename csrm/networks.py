@@ -12,6 +12,7 @@ class CSRM(Backbone):
     model_name,
     num_classes=20,
     num_classes_segm=None,
+    channels=3,
     backbone_weights="imagenet",
     mode='fix',
     dilated=False,
@@ -27,6 +28,7 @@ class CSRM(Backbone):
   ):
     super().__init__(
       model_name,
+      channels=channels,
       weights=backbone_weights,
       mode=mode,
       dilated=dilated,

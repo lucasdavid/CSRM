@@ -12,7 +12,7 @@
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
       "env": {
-        "PYTHONPATH": "/home/ldavid/workspace/repos/research/wsss/single-stage"
+        "PYTHONPATH": "/home/ldavid/workspace/repos/research/wsss/wsss-csrm"
         // "CUDA_VISIBLE_DEVICES": ""
       },
       "args": [

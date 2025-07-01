@@ -26,10 +26,10 @@
 
 if [[ "`hostname`" == "sdumont"* ]]; then
   ENV=sdumont
-  WORK_DIR=$SCRATCH/single-stage
+  WORK_DIR=$SCRATCH/wsss-csrm
 else
   ENV=local
-  WORK_DIR=$HOME/workspace/repos/research/wsss/single-stage
+  WORK_DIR=$HOME/workspace/repos/research/wsss/wsss-csrm
 fi
 
 echo "Env:      $ENV"

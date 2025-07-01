@@ -2,10 +2,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=48
 #SBATCH --gpus=4
-#SBATCH -p sequana_gpu_shared
-#SBATCH -J ss-train
-#SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/ss/train-ablation-%j.out
-#SBATCH --time=24:00:00
+#SBATCH -p sequana_gpu
+#SBATCH -J priors
+#SBATCH -o /scratch/lerdl/lucas.david/experiments/logs/csrm/train-%j.out
+#SBATCH --time=04:00:00
 
 # Copyright 2023 Lucas Oliveira David
 #
@@ -27,7 +27,7 @@
 
 if [[ "`hostname`" == "sdumont"* ]]; then
   ENV=sdumont
-  WORK_DIR=$SCRATCH/single-stage
+  WORK_DIR=$SCRATCH/wsss-csrm
 else
   ENV=local
   WORK_DIR=$HOME/workspace/repos/research/wsss/wsss-csrm
@@ -37,17 +37,32 @@ echo "Env:      $ENV"
 echo "Work Dir: $WORK_DIR"
 
 # Dataset
-DATASET=voc12  # Pascal VOC 2012
+# DATASET=voc12  # Pascal VOC 2012
 # DATASET=coco14  # MS COCO 2014
 # DATASET=deepglobe # DeepGlobe Land Cover Classification
+DATASET=hpa         # HPA Single Cell Classification
 
 . $WORK_DIR/runners/config/env.sh
 . $WORK_DIR/runners/config/dataset.sh
 
+echo "source activate $SCRATCH/envs/hpa"
+source activate $SCRATCH/envs/hpa
+
+PY=python3
+PIP=pip3
+
 export 'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256'
 
 cd $WORK_DIR
+echo "Which Python?"
+which $PY
+which $PIP
+
+cd $WORK_DIR
 export PYTHONPATH=$(pwd)
+export PYTHONHTTPSVERIFY=0
+export TORCH_HOME=$SCRATCH/.cache/torch
+export WANDB__SERVICE_WAIT=300
 
 # $PIP install --user -r requirements.txt
 
@@ -322,13 +337,13 @@ evaluate_pseudo_masks() {
     --num_workers $WORKERS_INFER;
 }
 
-# region Pascal VOC 2012
-#
-MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
-ARCHITECTURE=resnest101
-ARCH=rs101
-RESTORE=experiments/models/puzzle/rs101p.pth
-REST=rs101p
+# # region Pascal VOC 2012
+# #
+# MAX_STEPS=46  # ceil(1464 (voc12 train samples) / 16) = 92 steps.
+# ARCHITECTURE=resnest101
+# ARCH=rs101
+# RESTORE=experiments/models/puzzle/rs101p.pth
+# REST=rs101p
 # ARCHITECTURE=resnest269
 # ARCH=rs269
 # RESTORE=experiments/models/pnoc/voc12-rs269-pnoc-b16-lr0.1-ls@rs269-rals-r4.pth
@@ -366,30 +381,31 @@ REST=rs101p
 # REST=rs269p
 # endregion
 
-EID=r1  # Experiment ID
+# region HPA
+#
+PERFORM_VALIDATION=false
+MAX_STEPS=64  # 10% of 21807 / 32 ~= 68.125 steps.
+ARCHITECTURE=resnest269
+ARCH=rs269
+# RESTORE=/scratch/lerdl/lucas.david/experiments/models/vanilla/hpa-512-rs269-lr0.1-b32-ls0.1-re-mix-sgd-ema1-cp-1.0-0.5-sum-2.pth
+# REST=rs269cp
+RESTORE=/scratch/lerdl/lucas.david/experiments/models/pnoc/hpa-rs269-pnoc-b16-sgd-lr0.1-ls@rs269-remixls-cp-sum-r1.pth
+REST=rs269pnoc
+# endregion
+
+EID=r2  # Experiment ID
 INF_T=0.4
 
 TAG=csrm/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
 train_csrm
 WEIGHTS=experiments/models/$TAG.pth
 PRED_ROOT=experiments/predictions/$TAG
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
-
-TAG=csrm/$DATASET-$IMAGE_SIZE-${ARCH}-lr${LR}-m$MOMENTUM-b${BATCH}-ls$LABELSMOOTHING-$AUGMENT-$SAMPLER-bg${C2S_BG}-fg${C2S_FG}-c2s$W_C2S-s2c$W_S2C-u$W_U-c$W_CONTRA-rank$CONTRA_LOW_RANK-$CONTRA_HIGH_RANK-$C2S_mode@$REST-$EID
-train_csrm
-WEIGHTS=experiments/models/$TAG.pth
-PRED_ROOT=experiments/predictions/$TAG
-DOMAIN=$DOMAIN_VALID     inference
-DOMAIN=$DOMAIN_VALID_SEG inference
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
-DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
+# DOMAIN=$DOMAIN_VALID     inference
+# DOMAIN=$DOMAIN_VALID_SEG inference
+# DOMAIN=$DOMAIN_VALID     TAG=$TAG-cams       PRED_DIR=$PRED_ROOT@train/cams  CRF_T=0 evaluate_pseudo_masks
+# DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-cams@val   PRED_DIR=$PRED_ROOT@val/cams    CRF_T=0 evaluate_pseudo_masks
+# DOMAIN=$DOMAIN_VALID     TAG=$TAG-pseudo     PRED_DIR=$PRED_ROOT@train/pseudos-t$INF_T-c$CRF_T EVAL_MODE=png evaluate_pseudo_masks
+# DOMAIN=$DOMAIN_VALID_SEG TAG=$TAG-pseudo@val PRED_DIR=$PRED_ROOT@val/pseudos-t$INF_T-c$CRF_T   EVAL_MODE=png evaluate_pseudo_masks
 
 # region Pseudo segmentation masks
 #

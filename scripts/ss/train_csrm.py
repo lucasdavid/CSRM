@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import datasets
-import wandb
+# import wandb
 from csrm import CSRM, mutual_promotion, reco, u2pl
 from tools.ai.augment_utils import *
 from tools.ai.evaluate_utils import *
@@ -22,7 +22,7 @@ from tools.ai.log_utils import *
 from tools.ai.optim_utils import (OPTIMIZERS_NAMES, get_optimizer,
                                   linear_schedule)
 from tools.ai.torch_utils import *
-from tools.general import wandb_utils
+# from tools.general import wandb_utils
 from tools.general.io_utils import create_directory, str2bool
 from tools.general.time_utils import *
 
@@ -124,8 +124,10 @@ def train_csrm(args, wb_run, model_path):
   crop_size = [args.image_size] * 2
   scale_size = (args.min_image_size / args.image_size, args.max_image_size / args.image_size)
 
-  aug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=scale_size, augmentation=True)
-  noaug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False)
+  n_stats = tls.classification_info.normalize_stats
+
+  aug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=scale_size, augmentation=True, normalize_stats=n_stats)
+  noaug_transform = partial(datasets.batch_transform, crop_size=crop_size, scale_size=(1., 1.), augmentation=False, normalize_stats=n_stats)
 
   train_l_ds = datasets.SegmentationDataset(tls, transform=aug_transform, ignore_bg_images=True)
   train_u_ds = datasets.SegmentationDataset(tus, transform=noaug_transform, ignore_bg_images=True)
@@ -157,6 +159,7 @@ def train_csrm(args, wb_run, model_path):
     args.architecture,
     num_classes=tls.classification_info.num_classes,
     num_classes_segm=tls.segmentation_info.num_classes,
+    channels=tls.classification_info.channels,
     mode=args.mode,
     dilated=args.dilated,
     use_group_norm=args.use_gn,
@@ -289,6 +292,7 @@ def train_csrm(args, wb_run, model_path):
             num_classes=num_classes_segm,
             bg_class_clf=tls.classification_info.bg_class,
             bg_class_seg=tls.segmentation_info.bg_class,
+            normalize_stats=n_stats,
             augment=args.augment,
             cutmix_prob=args.cutmix_prob,
             use_sal_head=args.use_sal_head,
@@ -351,7 +355,7 @@ def train_csrm(args, wb_run, model_path):
             "conf_pixels_s2c": conf_pixels_s2c,
             "conf_pixels_c2s": conf_pixels_c2s,
           }
-          wandb.log({f"train/{k}": v for k, v in data.items()}, commit=not do_validation)
+          # wandb.log({f"train/{k}": v for k, v in data.items()}, commit=not do_validation)
           print(
             f" loss={loss:.3f} loss_c={loss_c:.3f} loss_c2s={loss_c2s:.3f} loss_s2c={loss_s2c:.3f} "
             f"loss_u={loss_u:.3f} loss_contra={loss_contra:.3f} lr={lr:.3f}"
@@ -375,7 +379,7 @@ def train_csrm(args, wb_run, model_path):
   except KeyboardInterrupt:
     print("training halted")
 
-  wb_run.finish()
+  # wb_run.finish()
 
 
 def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True):
@@ -385,7 +389,7 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
     metric_results.update({"step": optimizer.global_step, "epoch": epoch})
   model.train()
 
-  wandb.log({f"val/{k}": v for k, v in metric_results.items()}, commit=commit)
+  # wandb.log({f"val/{k}": v for k, v in metric_results.items()}, commit=commit)
   print(f"[Epoch {epoch}/{args.max_epoch}]",
         *(f"{m}={v:.3f}" if isinstance(v, float) else f"{m}={v}"
           for m, v in metric_results.items()))
@@ -394,7 +398,7 @@ def valid_loop(model, valid_loader, ts, epoch, optimizer, miou_best, commit=True
   improved = miou_now > miou_best
   if improved:
     miou_best = miou_now
-    wandb.run.summary[f"val/priors/best_miou"] = miou_now
+    # wandb.run.summary[f"val/priors/best_miou"] = miou_now
   return miou_best, improved
 
 
@@ -420,6 +424,7 @@ def train_step(
   num_classes: int,
   bg_class_clf: int,
   bg_class_seg: int,
+  normalize_stats = None,
   augment: str = "none",
   cutmix_prob: float = 0.5,
   use_sal_head: bool = False,
@@ -479,6 +484,7 @@ def train_step(
           resize_align_corners=True,
           mode=c2s_mode,
           c2s_sigma=c2s_sigma,
+          normalize_stats=normalize_stats,
         )
 
       if "mix" in augment and np.random.uniform(0, 1) < cutmix_prob:
@@ -715,9 +721,10 @@ def valid_step(
 
       if step == 0 and log_samples:
         inputs = to_numpy(inputs)
-        wandb_utils.log_cams(ids, inputs, targets, cams, preds, classes=info_cls.classes, tag="val/priors")
-        wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes,
-                              void_class=info_seg.void_class, tag="val/segmentation")
+        n_stats = info_cls.normalize_stats
+        # wandb_utils.log_cams(ids, inputs, targets, cams, preds, info_cls.classes, n_stats, tag="val/priors")
+        # wandb_utils.log_masks(ids, inputs, targets, masks, pred_masks, info_seg.classes, n_stats,
+        #                       void_class=info_seg.void_class, tag="val/segmentation")
 
       if max_steps and step >= max_steps:
         break
@@ -768,7 +775,8 @@ if __name__ == '__main__':
   if args.validate_thresholds:
     THRESHOLDS = list(map(float, args.validate_thresholds.split(",")))
 
-  wb_run = wandb_utils.setup(TAG, args)
+  # wb_run = wandb_utils.setup(TAG, args)
+  wb_run = None
   log_config(vars(args), TAG)
 
   model_path = f"./experiments/models/{TAG}.pth"

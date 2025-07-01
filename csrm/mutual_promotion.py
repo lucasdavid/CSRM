@@ -20,6 +20,7 @@ def get_pseudo_label(
   c2s_sigma=0.5,
   clf_t=0.5,
   num_workers: int = None,
+  normalize_stats = None,
 ):
   sizes = images.shape[2:]
 
@@ -34,13 +35,23 @@ def get_pseudo_label(
   images = to_numpy(images)
   masks_bg = to_numpy(masks_bg)
 
+  if normalize_stats is None:
+    normalize_stats = datasets.imagenet_stats()
+
+  def d(i):
+    i = denormalize(i, *normalize_stats)
+    if i.shape[-1] > 3:
+      i = i[..., :3]
+
+    return i
+
   with Pool(processes=min(num_workers, len(images)) if num_workers else len(images)) as pool:
     if mode == "cam":
       _fn = _get_pseudo_label_from_cams
-      _args = [(i, c, t, thresholds) for i, c, t in zip(images, cams, targets_b)]
+      _args = [(d(i), c, t, thresholds) for i, c, t in zip(images, cams, targets_b)]
     else:
       _fn = _get_pseudo_label_from_mutual_promotion
-      _args = [(i, c, t, m, c2s_sigma) for i, c, t, m in zip(images, cams, targets_b, masks_bg)]
+      _args = [(d(i), c, t, m, c2s_sigma) for i, c, t, m in zip(images, cams, targets_b, masks_bg)]
 
     masks = pool.map(_fn, _args)
 
@@ -53,7 +64,6 @@ def to_2d(x):
 
 def _get_pseudo_label_from_cams(args):
   image, cam, target, (bg_t, fg_t) = args
-  image = denormalize(image, *datasets.imagenet_stats())
 
   cam = cam[target]
   labels = np.concatenate(([0], np.where(target)[0] + 1))
@@ -74,8 +84,7 @@ def _get_pseudo_label_from_cams(args):
 
 
 def _get_pseudo_label_from_mutual_promotion(args):
-  image, cam, target, bg_mask, c2s_sigma = args
-  image = denormalize(image, *datasets.imagenet_stats())
+  _, cam, target, bg_mask, c2s_sigma = args
 
   cam = cam[target]
   labels = np.concatenate(([0], np.where(target)[0] + 1))
