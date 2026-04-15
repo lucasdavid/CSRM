@@ -5,6 +5,8 @@
 This repository contains the official implementation for the paper "Learning Weakly Supervised Semantic Segmentation Through
 Cross-Supervision and Contrasting of Pixel-Level Pseudo-Labels", accepted for publishing in VISAPP 2025.
 
+For results over HPA Single Cell Classification dataset, see [gh/annwith/hpa-individual-cell-classifier](https://github.com/annwith/hpa-individual-cell-classifier).
+
 <p align="center" style="text-align:center;">
   <img src="https://github.com/lucasdavid/wsss-csrm/blob/master/assets/wsss-csrm-diagram.png"
        alt="Diagram for the proposed method CSRM." />
